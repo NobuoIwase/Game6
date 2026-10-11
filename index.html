@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Earth Defense Test</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/src/ui/style.css" />
+</head>
+<body>
+  <canvas id="renderCanvas" touch-action="none"></canvas>
+
+  <!-- ===== ローディング ===== -->
+  <div id="loading" class="screen">
+    <div class="logo">EARTH DEFENSE TEST</div>
+    <div class="loadbar"><div id="loadfill"></div></div>
+    <div id="loadtext">読み込み中...</div>
+  </div>
+
+  <!-- ===== タイトル / 出撃準備 ===== -->
+  <div id="title" class="screen hidden">
+    <div class="logo">EARTH DEFENSE TEST</div>
+    <div class="subtitle">― 全地球防衛隊 陸戦兵 ―</div>
+    <div class="panel">
+      <div class="mission-name" id="missionName"></div>
+      <div class="mission-desc" id="missionDesc"></div>
+      <div class="loadout">
+        <label>武器1 <select id="weapon1"></select></label>
+        <label>武器2 <select id="weapon2"></select></label>
+      </div>
+      <div class="loadout">
+        <label>難易度 <select id="difficulty"></select></label>
+        <label>画質 <select id="quality">
+          <option value="auto">自動</option>
+          <option value="low">低（スマホ向け）</option>
+          <option value="medium">中</option>
+          <option value="high">高</option>
+        </select></label>
+      </div>
+      <button id="startBtn" class="btn">出撃</button>
+      <div class="controls-help" id="controlsHelp"></div>
+    </div>
+  </div>
+
+  <!-- ===== HUD ===== -->
+  <div id="hud" class="hidden">
+    <div id="armor">
+      <div class="armor-num"><span id="armorCur">0</span> / <span id="armorMax">0</span></div>
+      <div class="armor-bar"><div id="armorFill"></div></div>
+    </div>
+    <canvas id="radar" width="200" height="200"></canvas>
+    <div id="missionInfo"><span id="enemyCount">0</span></div>
+    <div id="crosshair"><div class="ch-dot"></div></div>
+    <div id="hitmarker"></div>
+    <div id="lockLayer"></div>
+    <div id="weaponPanel">
+      <div class="wp-sub" id="wpSub"></div>
+      <div class="wp-main">
+        <canvas id="wpIcon" width="160" height="56"></canvas>
+        <div class="wp-name" id="wpName"></div>
+        <div class="wp-ammo"><span id="wpAmmo">0</span> / <span id="wpMag">0</span></div>
+        <div class="wp-reload"><div id="wpReloadFill"></div></div>
+      </div>
+    </div>
+    <div id="radio"></div>
+    <div id="status"></div>
+    <div id="damageVignette"></div>
+    <div id="bindOverlay"></div>
+  </div>
+
+  <!-- ===== タッチ操作 ===== -->
+  <div id="touch" class="hidden">
+    <div id="stickZone"><div id="stickBase"><div id="stickKnob"></div></div></div>
+    <div id="lookZone"></div>
+    <div class="tbtn" id="tFire">射撃</div>
+    <div class="tbtn small" id="tZoom">ズーム</div>
+    <div class="tbtn small" id="tReload">リロード</div>
+    <div class="tbtn small" id="tSwitch">武器切替</div>
+    <div class="tbtn small" id="tJump">ジャンプ</div>
+    <div class="tbtn small" id="tRoll">回避</div>
+    <div class="tbtn tiny" id="tPause">Ⅱ</div>
+  </div>
+
+  <!-- ===== ポーズ / 結果 ===== -->
+  <div id="pause" class="screen hidden">
+    <div class="logo small">PAUSE</div>
+    <button id="resumeBtn" class="btn">再開</button>
+    <button id="retireBtn" class="btn ghost">撤退（タイトルへ）</button>
+  </div>
+  <div id="result" class="screen hidden">
+    <div class="logo" id="resultTitle"></div>
+    <div id="resultText"></div>
+    <button id="retryBtn" class="btn">再出撃</button>
+    <button id="toTitleBtn" class="btn ghost">タイトルへ</button>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
