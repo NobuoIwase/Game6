@@ -9,6 +9,7 @@ import {
   Color4,
   DefaultRenderingPipeline,
   DirectionalLight,
+  EquiRectangularCubeTexture,
   HDRCubeTexture,
   ImageProcessingConfiguration,
   Mesh,
@@ -139,7 +140,12 @@ export class Game implements GameContext {
 
     // ---- 光源・空 ----
     this.progress(0.2, "空と光源を準備中...");
-    const env = new HDRCubeTexture("assets/hdri/sky_1k.hdr", scene, 256, false, true, false, true);
+    // HDR が読めない環境（.hdr を配信できないホスティング等）では空の JPG で代用する
+    const env = new HDRCubeTexture("assets/hdri/sky_1k.hdr", scene, 256, false, true, false, true, null, () => {
+      console.warn("HDR 環境マップを読み込めないため、空の JPG で代用します");
+      scene.environmentTexture = new EquiRectangularCubeTexture("assets/hdri/sky_4k.jpg", scene, 256);
+      env.dispose();
+    });
     scene.environmentTexture = env;
     scene.environmentIntensity = 0.85;
     const dome = new PhotoDome("sky", "assets/hdri/sky_4k.jpg", { resolution: 48, size: 2800 }, scene);
