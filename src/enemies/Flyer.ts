@@ -11,7 +11,7 @@ import { Color3, InstancedMesh, Mesh, MeshBuilder, PBRMaterial, Quaternion, Scen
 import { ENEMIES, FLYER_BOMB_DAMAGE } from "../data/enemies";
 import type { GameContext } from "../core/GameContext";
 import { Enemy } from "./Enemy";
-import { angleDiff, clamp, damp, rand } from "../core/MathUtil";
+import { clamp, damp, rand } from "../core/MathUtil";
 import { spreadDir } from "../combat/Weapon";
 import { sfx } from "../core/Audio";
 import { hideTemplate } from "./Ant";
@@ -83,7 +83,12 @@ export function flyerTemplateMeshes(scene: Scene): Mesh[] {
 /** 編隊（隊長機の飛行ロジックを持つ） */
 export class FlyerSquad {
   members: Flyer[] = [];
-  phase: "patrol" | "approach" | "extend" = "patrol";
+  phase: "patrol" | "approach" | "extend" | "loop" = "patrol";
+  /** 宙返りの情報（中心・水平方向・回転軸・向き） */
+  loopC = new Vector3();
+  loopH = new Vector3();
+  loopAxis = new Vector3();
+  loopSign = 1;
   pass = 0;
   bombing = false;
   /** 爆撃中は編隊ごと裏返って飛ぶ（裏返っている間だけ爆弾を落とす） */
@@ -128,8 +133,10 @@ export class Flyer extends Enemy {
   private wingR: InstancedMesh;
   private gunCd = 0;
   private bombCd = 0;
-  private prevYaw = 0;
-  private yawRate = 0;
+  /** 機体の上方向（宙返りで自然に裏返るよう、加速度から求める） */
+  private up = new Vector3(0, 1, 0);
+  private prevVel = new Vector3();
+  private acc = new Vector3();
 
   constructor(ctx: GameContext, pos: Vector3, group: number, squad: FlyerSquad, slot: number) {
     super(ENEMIES.flyer, ctx, pos, group);
@@ -186,15 +193,30 @@ export class Flyer extends Enemy {
     if (this.isLeader) this.leaderBrain(dt);
     else this.followLeader(dt);
 
-    // 姿勢: 進行方向 + 旋回に応じたバンク（急旋回では裏返る）
-    const yaw = Math.atan2(this.heading.x, this.heading.z);
-    const pitch = -Math.asin(clamp(this.heading.y, -1, 1));
-    this.yawRate = this.yawRate + (angleDiff(this.prevYaw, yaw) / Math.max(dt, 1e-4) - this.yawRate) * damp(6, dt);
-    this.prevYaw = yaw;
-    // 爆撃時は裏返る。それ以外は旋回に応じて大きくバンク
-    const targetBank = this.squad.inverted && this.active ? (this.bank >= 0 ? Math.PI : -Math.PI) : clamp(-this.yawRate * 3, -1.6, 1.6);
-    this.bank += (targetBank - this.bank) * damp(3, dt);
-    Quaternion.RotationYawPitchRollToRef(yaw, pitch, this.bank, this.root.rotationQuaternion!);
+    // 姿勢: 機体の「上」は（旋回の加速度 + 重力に逆らう向き）。宙返りの頂点では自然に裏返る。
+    // 爆撃航過では意図的に裏返って飛ぶ。向きの変化はゆっくり（グイーンと回る）。
+    if (dt > 0) {
+      const a = this.vel.subtract(this.prevVel).scaleInPlace(1 / dt);
+      this.acc.addInPlace(a.subtract(this.acc).scaleInPlace(damp(5, dt)));
+      this.prevVel.copyFrom(this.vel);
+    }
+    const f = this.heading;
+    let want: Vector3;
+    if (this.squad.inverted && this.active) want = new Vector3(0, -1, 0);
+    else want = this.acc.subtract(f.scale(Vector3.Dot(this.acc, f))).addInPlace(new Vector3(0, 9.8, 0));
+    want.subtractInPlace(f.scale(Vector3.Dot(want, f)));
+    if (want.lengthSquared() < 1e-4) want.copyFrom(this.up);
+    want.normalize();
+    let right = Vector3.Cross(this.up, f);
+    if (right.lengthSquared() < 1e-6) right = Vector3.Cross(Vector3.Up(), f);
+    right.normalize();
+    // 真逆を向いているときはどちらかへ転がり始めるよう少し傾ける
+    if (Vector3.Dot(want, this.up) < -0.9) want.addInPlace(right.scale(0.5)).normalize();
+    this.up.addInPlace(want.subtract(this.up).scaleInPlace(damp(2.2, dt)));
+    right = Vector3.Cross(this.up, f).normalize();
+    this.up = Vector3.Cross(f, right).normalize();
+    this.bank = Math.acos(clamp(this.up.y, -1, 1)); // 0 = 水平, π = 背面
+    Quaternion.RotationQuaternionFromAxisToRef(right, this.up, f, this.root.rotationQuaternion!);
   }
 
   /**
@@ -253,14 +275,14 @@ export class Flyer extends Enemy {
         const toAim = aim.subtract(this.position);
         this.steer(toAim, 6, this.def.speed, dt);
         const hd = Math.hypot(toAim.x, toAim.z);
-        sq.inverted = sq.bombing && hd < 150; // 爆撃航過: 手前から裏返り始める
+        sq.inverted = sq.bombing; // 爆撃航過は背面飛行のまま
         const facing = Vector3.Dot(new Vector3(toAim.x, 0, toAim.z).normalize(), new Vector3(this.heading.x, 0, this.heading.z).normalize());
         // 頭上を通過したら離脱へ（慣性で大回りするので、遠くで背を向けている間は旋回を続ける）
         if (hd < 22 || (facing < 0 && hd < 70 && sq.phaseT > 2) || sq.phaseT > 25) {
           sq.phase = "extend";
           sq.phaseT = 0;
-          sq.target = this.position.add(new Vector3(this.heading.x, 0, this.heading.z).normalize().scale(rand(110, 150)));
-          sq.target.y = alt + rand(5, 15);
+          sq.target = this.position.add(new Vector3(this.heading.x, 0, this.heading.z).normalize().scale(rand(90, 120)));
+          sq.target.y = alt - 5; // 離脱しながら高度を下げ、宙返りに備える
           // マップの外へ飛び去らないように
           sq.target.x = clamp(sq.target.x, -210, 210);
           sq.target.z = clamp(sq.target.z, -210, 210);
@@ -268,14 +290,34 @@ export class Flyer extends Enemy {
         break;
       }
       case "extend": {
-        // 通過後は直進して離脱し、反転して次の航過へ
-        sq.inverted = sq.bombing && sq.phaseT < 3;
+        // 通過後はしばらく直進して離脱し、宙返りで戻ってくる
+        sq.inverted = false;
         this.steer(sq.target.subtract(this.position), 6, this.def.speed * 1.1, dt);
-        if (sq.phaseT > 4.5 || Vector3.Distance(sq.target, this.position) < 20) {
+        if (sq.phaseT > 5 || Vector3.Distance(sq.target, this.position) < 15) {
+          sq.phase = "loop";
+          sq.phaseT = 0;
+          const R = 30;
+          sq.loopH.set(this.heading.x, 0, this.heading.z).normalize();
+          sq.loopC.copyFrom(this.position).addInPlace(new Vector3(0, R, 0));
+          sq.loopAxis = Vector3.Cross(Vector3.Up(), sq.loopH).normalize();
+          const t0 = Vector3.Cross(sq.loopAxis, new Vector3(0, -R, 0));
+          sq.loopSign = Vector3.Dot(t0, sq.loopH) >= 0 ? 1 : -1;
+        }
+        break;
+      }
+      case "loop": {
+        // 縦の半宙返り: 上昇しながら背面になり、来た方向へ戻る
+        const r = this.position.subtract(sq.loopC);
+        r.subtractInPlace(sq.loopAxis.scale(Vector3.Dot(r, sq.loopAxis)));
+        const R = 30;
+        const tan = Vector3.Cross(sq.loopAxis, r).normalize().scaleInPlace(sq.loopSign);
+        const pull = r.normalizeToNew().scaleInPlace(-(r.length() - R) / R);
+        this.steer(tan.add(pull), 14, this.def.speed, dt);
+        if (Vector3.Dot(this.heading, sq.loopH) < -0.8 || sq.phaseT > 8) {
           sq.phase = "approach";
           sq.phaseT = 0;
           sq.pass++;
-          // 2回機銃掃射したら次は爆撃、以降は交互
+          // 2回機銃掃射したら次は爆撃、以降は交互。爆撃ならそのまま背面飛行で戻ってくる
           sq.bombing = sq.pass >= 3 && sq.pass % 2 === 1;
           sq.side = Math.random() < 0.5 ? -1 : 1;
         }
@@ -308,17 +350,17 @@ export class Flyer extends Enemy {
     if (!player.alive) return;
     const toP = player.chest.subtract(this.position);
     const dist = toP.length();
-    const inverted = Math.abs(this.bank) > 2.4;
+    const inverted = this.up.y < -0.5;
     if (inverted) {
       // 絨毯爆撃: 裏返っている間、一定間隔で投下
       const hd = Math.hypot(toP.x, toP.z);
-      if (hd < 90 && this.bombCd <= 0) {
+      if (hd < 90 && this.bombCd <= 0 && sq.phase === "approach") {
         this.bombCd = 0.45 + Math.random() * 0.15;
         const v = this.heading.scale(this.speed * 0.9).add(new Vector3(0, -2, 0));
         this.ctx.projectiles.spawnEnemy("bomb", this.position.add(new Vector3(0, -1.2, 0)), v, FLYER_BOMB_DAMAGE * this.ctx.difficulty.enemyDamage);
         sfx.enemyShot(this.position, "bomb");
       }
-    } else if (sq.phase === "approach" && !sq.bombing && Math.abs(this.bank) < 1.2) {
+    } else if (sq.phase === "approach" && !sq.bombing && this.up.y > 0.55) {
       // 機銃掃射: 機首方向にプレイヤーがいれば連射
       const facing = Vector3.Dot(toP.scale(1 / dist), this.heading);
       if (dist < this.def.attackRange && facing > 0.7 && this.gunCd <= 0) {

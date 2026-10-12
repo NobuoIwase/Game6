@@ -274,6 +274,11 @@ export class Hud {
       if (!q) continue;
       c.fillStyle = e.active ? "#ff3b3b" : "#b91c1c";
       c.beginPath();
+      if (e.kind === "carrier") {
+        c.fillStyle = "#ff8a3b";
+        c.fillRect(q[0] - 6, q[1] - 6, 12, 12);
+        continue;
+      }
       if (e.kind === "flyer") {
         c.moveTo(q[0], q[1] - 4);
         c.lineTo(q[0] + 3.5, q[1] + 3);

@@ -234,6 +234,11 @@ export interface CityMaterials {
   rubble: PBRMaterial;
   balcony: PBRMaterial;
   garageWall: PBRMaterial;
+  grass: PBRMaterial;
+  rooftile: PBRMaterial;
+  plaster: PBRMaterial;
+  corrugated: PBRMaterial;
+  water: PBRMaterial;
   marking: PBRMaterial;
   metal: PBRMaterial;
   darkMetal: PBRMaterial;
@@ -270,6 +275,16 @@ export async function createCityMaterials(scene: Scene): Promise<CityMaterials> 
   const rubble = surfaceMaterial("rubble", "facade", scene, 1, new Color3(0.55, 0.53, 0.5));
   const balcony = surfaceMaterial("balcony", "pavement", scene, 1, new Color3(0.85, 0.83, 0.8));
   const garageWall = surfaceMaterial("garageWall", "facade", scene, 1, new Color3(0.8, 0.8, 0.78));
+  const grass = surfaceMaterial("grass", "grass", scene, 1);
+  const rooftile = surfaceMaterial("rooftile", "rooftile", scene, 1, new Color3(0.75, 0.78, 0.85));
+  rooftile.backFaceCulling = false;
+  rooftile.twoSidedLighting = true;
+  const plaster = surfaceMaterial("plaster", "plaster", scene, 1);
+  const corrugated = surfaceMaterial("corrugated", "corrugated", scene, 1, new Color3(0.8, 0.82, 0.85));
+  const water = new PBRMaterial("water", scene);
+  water.albedoColor = new Color3(0.03, 0.07, 0.07);
+  water.metallic = 0;
+  water.roughness = 0.04;
 
   const marking = new PBRMaterial("marking", scene);
   marking.albedoColor = new Color3(0.85, 0.85, 0.82);
@@ -320,5 +335,5 @@ export async function createCityMaterials(scene: Scene): Promise<CityMaterials> 
   lampGlow.roughness = 0.3;
   lampGlow.metallic = 0;
 
-  return { facades, roof, road, sidewalk, plaza, rubble, balcony, garageWall, marking, metal, darkMetal, carPaints, glassDark, tire, lampGlow };
+  return { facades, roof, road, sidewalk, plaza, rubble, balcony, garageWall, grass, rooftile, plaster, corrugated, water, marking, metal, darkMetal, carPaints, glassDark, tire, lampGlow };
 }

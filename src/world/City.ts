@@ -33,17 +33,36 @@ import {
 } from "@babylonjs/core";
 import { CityMaterials, FACADE_SPECS, FacadeStyle } from "./Materials";
 import { COL_STATIC, COL_ALL } from "../core/Physics";
+import { createProps, PropBatch, PropKit, wirePath } from "./Props";
 
 export const CITY_HALF = 250;
 const PITCH = 72;
-const ROAD = 16;
-const BLOCK = PITCH - ROAD; // 56
 const SIDEWALK_H = 0.12;
+const SIDEWALK_W = 4;
 const BLOCK_RANGE = 3; // -3..3 の 7x7 街区
+/** 道路の中心線（x 方向・z 方向とも同じ位置） */
+const LINES = [-252, -180, -108, -36, 36, 108, 180, 252];
+/** x = LINES[k] を南北に走る道路の幅（x=108 の道路の上を高速道路が通る） */
+const ROAD_W_X = [16, 16, 16, 16, 16, 18, 16, 16];
+/** z = LINES[k] を東西に走る道路の幅（z=-36 は中央分離帯のある大通り） */
+const ROAD_W_Z = [16, 16, 16, 30, 16, 16, 16, 16];
+const AVENUE_Z = -36;
+const HIGHWAY_X = 108;
+
+export type BlockKind = "plaza" | "park" | "business" | "mixed" | "residential";
+export interface Block {
+  i: number;
+  j: number;
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+  kind: BlockKind;
+}
 /** プレイヤーが乗り越えられる段差 */
 export const STEP_UP = 0.6;
 
-export type BuildingKind = "office" | "glass" | "apartment" | "garage" | "shop" | "monument";
+export type BuildingKind = "office" | "glass" | "apartment" | "garage" | "shop" | "monument" | "house" | "highway" | "bridge" | "hut";
 
 /** 当たり判定の箱（ワールド座標） */
 export interface Box {
@@ -73,6 +92,8 @@ export interface Building {
   maxHp: number;
   state: "standing" | "collapsing" | "gone";
   collapseT: number;
+  /** 建物に付いた小物（thin instance）。倒壊時に一緒に沈める */
+  thin: { batch: PropBatch; idx: number }[];
 }
 
 export interface RayHit {
@@ -116,6 +137,12 @@ function uvBox(scene: Scene, w: number, h: number, d: number, tile: number, wrap
 class Builder {
   meshes: Mesh[] = [];
   boxes: { c: Vector3; s: Vector3 }[] = [];
+  /** 通りに面した向き（看板の向きなど） */
+  front = new Vector3(0, 0, 1);
+  /** 屋上の飾り（室外機など）を置くか */
+  roofClutter = true;
+  signs = false;
+  thin: { batch: PropBatch; m: Matrix }[] = [];
   constructor(
     public cx: number,
     public cz: number,
@@ -145,6 +172,10 @@ export class City {
   onCollapseEnd?: (b: Building) => void;
   shadowCasters: Mesh[] = [];
   private carTemplates: Mesh[] = [];
+  blocks: Block[] = [];
+  private props!: PropKit;
+  private wires: Mesh[] = [];
+  private steel: PBRMaterial;
   private concrete: PBRMaterial;
   private awnings: PBRMaterial[];
 
@@ -153,6 +184,10 @@ export class City {
     private mats: CityMaterials,
   ) {
     this.concrete = mats.roof;
+    this.steel = new PBRMaterial("bridgeSteel", scene);
+    this.steel.albedoColor = new Color3(0.25, 0.42, 0.45);
+    this.steel.roughness = 0.45;
+    this.steel.metallic = 0.6;
     this.awnings = [new Color3(0.55, 0.08, 0.06), new Color3(0.08, 0.25, 0.45), new Color3(0.12, 0.35, 0.15)].map((c, i) => {
       const m = new PBRMaterial("awning" + i, scene);
       m.albedoColor = c;
@@ -163,13 +198,35 @@ export class City {
   }
 
   build() {
+    this.props = createProps(this.scene, {
+      concrete: this.concrete,
+      metal: this.mats.metal,
+      darkMetal: this.mats.darkMetal,
+      glassDark: this.mats.glassDark,
+      plaster: this.mats.plaster,
+      rooftile: this.mats.rooftile,
+      corrugated: this.mats.corrugated,
+    });
     this.buildGround();
     this.carTemplates = this.createCarTemplates();
+    this.layoutBlocks();
     this.buildBlocks();
+    this.buildAvenue();
+    this.buildHighway();
+    this.buildFootbridge(12);
     this.buildMarkings();
     this.buildLamps();
+    this.buildStreetFurniture();
     this.buildCars();
     this.buildSkyline();
+    for (const b of this.props.all) b.build();
+    for (const b of this.props.all) this.shadowCasters.push(b.mesh);
+    if (this.wires.length) {
+      const w = Mesh.MergeMeshes(this.wires, true, true)!;
+      w.material = this.props.wireMat;
+      w.isPickable = false;
+      w.freezeWorldMatrix();
+    }
   }
 
   // ------------------------------------------------------------------ 地面・街区
@@ -196,40 +253,78 @@ export class City {
     body.shape = shape;
   }
 
-  private blockCenters(): [number, number, number, number][] {
-    const out: [number, number, number, number][] = [];
+  /** 街区の配置（道路幅から各街区の範囲を決め、用途を割り当てる） */
+  private layoutBlocks() {
     for (let i = -BLOCK_RANGE; i <= BLOCK_RANGE; i++)
-      for (let j = -BLOCK_RANGE; j <= BLOCK_RANGE; j++) out.push([i * PITCH, j * PITCH, i, j]);
-    return out;
+      for (let j = -BLOCK_RANGE; j <= BLOCK_RANGE; j++) {
+        const kx = i + 3,
+          kz = j + 3;
+        const ring = Math.max(Math.abs(i), Math.abs(j));
+        let kind: BlockKind = ring <= 1 ? "business" : ring === 2 ? "mixed" : "residential";
+        // 大通り沿いは外周でも商店街
+        if (ring === 3 && (j === -1 || j === 0) && Math.abs(i) <= 2) kind = "mixed";
+        if (i === 0 && j === 0) kind = "plaza";
+        if (i === 1 && j === 0) kind = "park";
+        this.blocks.push({
+          i,
+          j,
+          minX: LINES[kx] + ROAD_W_X[kx] / 2,
+          maxX: LINES[kx + 1] - ROAD_W_X[kx + 1] / 2,
+          minZ: LINES[kz] + ROAD_W_Z[kz] / 2,
+          maxZ: LINES[kz + 1] - ROAD_W_Z[kz + 1] / 2,
+          kind,
+        });
+      }
+  }
+
+  /** 地点 (x,z) を含む街区 */
+  blockAt(x: number, z: number): Block | null {
+    const i = Math.round(x / PITCH),
+      j = Math.round(z / PITCH);
+    if (Math.abs(i) > BLOCK_RANGE || Math.abs(j) > BLOCK_RANGE) return null;
+    const b = this.blocks[(i + BLOCK_RANGE) * (BLOCK_RANGE * 2 + 1) + (j + BLOCK_RANGE)];
+    return x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ ? b : null;
   }
 
   private buildBlocks() {
-    // 歩道（街区の台座）: 全街区同じ大きさなので thin instance で1回の描画
-    const sw = uvBox(this.scene, BLOCK, SIDEWALK_H, BLOCK, 3);
+    // 歩道（街区の台座）: 全部まとめて1つのメッシュ
+    const sws: Mesh[] = [];
+    for (const bl of this.blocks) {
+      const w = bl.maxX - bl.minX,
+        d = bl.maxZ - bl.minZ;
+      const cx = (bl.minX + bl.maxX) / 2,
+        cz = (bl.minZ + bl.maxZ) / 2;
+      const m = uvBox(this.scene, w, SIDEWALK_H, d, bl.kind === "plaza" ? 4 : 3);
+      m.position.set(cx, SIDEWALK_H / 2, cz);
+      sws.push(m);
+    }
+    const sw = Mesh.MergeMeshes(sws, true, true)!;
     sw.material = this.mats.sidewalk;
     sw.receiveShadows = true;
-    const swMats: Matrix[] = [];
-    for (const [cx, cz, i, j] of this.blockCenters()) {
-      if (i === 0 && j === 0) {
-        // 中央はプレイヤー初期位置の広場
-        const plaza = uvBox(this.scene, BLOCK, SIDEWALK_H, BLOCK, 4);
-        plaza.position.set(cx, SIDEWALK_H / 2, cz);
+    sw.freezeWorldMatrix();
+    for (const bl of this.blocks) {
+      const ring = Math.max(Math.abs(bl.i), Math.abs(bl.j));
+      if (bl.kind === "plaza") {
+        const cx = (bl.minX + bl.maxX) / 2,
+          cz = (bl.minZ + bl.maxZ) / 2;
+        const plaza = uvBox(this.scene, bl.maxX - bl.minX - 2 * SIDEWALK_W, 0.02, bl.maxZ - bl.minZ - 2 * SIDEWALK_W, 4);
+        plaza.position.set(cx, SIDEWALK_H + 0.01, cz);
         plaza.material = this.mats.plaza;
         plaza.receiveShadows = true;
         plaza.freezeWorldMatrix();
-        this.buildMonument(cx, cz - 14);
+        this.buildMonument(cx, cz - 6);
         continue;
       }
-      swMats.push(Matrix.Translation(cx, SIDEWALK_H / 2, cz));
-      this.fillBlock(cx, cz, Math.max(Math.abs(i), Math.abs(j)));
+      if (bl.kind === "park") this.buildPark(bl);
+      else if (bl.kind === "residential") this.fillResidential(bl);
+      else this.fillBlock(bl, ring);
     }
-    sw.thinInstanceAdd(swMats);
-    sw.freezeWorldMatrix();
   }
 
   /** 広場の記念碑（低い遮蔽物） */
   private buildMonument(x: number, z: number) {
     const B = new Builder(x, z);
+    B.roofClutter = false;
     const base = MeshBuilder.CreateBox("monument", { width: 4, height: 1.2, depth: 4 }, this.scene);
     base.material = this.concrete;
     B.part(base, new Vector3(0, 0.6, 0), new Vector3(4, 1.2, 4));
@@ -239,66 +334,441 @@ export class City {
     this.finish(B, "monument", 1e9);
   }
 
-  /** 1つの街区に建物を並べる */
-  private fillBlock(cx: number, cz: number, ring: number) {
-    const inner = BLOCK - 8; // 歩道幅 4m
+  /** 通りに面した向き（ロットの中心から一番近い街区の辺の方向） */
+  private frontOf(bl: Block, x: number, z: number): Vector3 {
+    const d = [x - bl.minX, bl.maxX - x, z - bl.minZ, bl.maxZ - z];
+    const m = Math.min(...d);
+    if (m === d[0]) return new Vector3(-1, 0, 0);
+    if (m === d[1]) return new Vector3(1, 0, 0);
+    if (m === d[2]) return new Vector3(0, 0, -1);
+    return new Vector3(0, 0, 1);
+  }
+
+  /** ビル街・商店街の街区に建物を並べる */
+  private fillBlock(bl: Block, ring: number) {
+    const x0 = bl.minX + SIDEWALK_W,
+      x1 = bl.maxX - SIDEWALK_W,
+      z0 = bl.minZ + SIDEWALK_W,
+      z1 = bl.maxZ - SIDEWALK_W;
+    const W = x1 - x0,
+      D = z1 - z0;
+    const cx = (x0 + x1) / 2,
+      cz = (z0 + z1) / 2;
     const layout = Math.random();
-    const lots: [number, number, number, number][] = []; // x, z, w, d
+    const lots: [number, number, number, number][] = [];
     const g = 3;
-    const half = (inner - g) / 2;
-    if (layout < 0.2) {
-      lots.push([cx, cz, inner, inner]);
+    if (bl.kind === "mixed") {
+      // 商店街: 通り沿いに細い建物が並ぶ（3列 x 2列）
+      const nx = 3,
+        nz = 2;
+      const lw = (W - g * (nx - 1)) / nx,
+        ld = (D - g * (nz - 1)) / nz;
+      for (let a = 0; a < nx; a++) for (let c = 0; c < nz; c++) lots.push([x0 + lw / 2 + a * (lw + g), z0 + ld / 2 + c * (ld + g), lw, ld]);
+    } else if (layout < 0.2) {
+      lots.push([cx, cz, W, D]);
     } else if (layout < 0.55) {
-      if (Math.random() < 0.5) lots.push([cx - (half + g) / 2, cz, half, inner], [cx + (half + g) / 2, cz, half, inner]);
-      else lots.push([cx, cz - (half + g) / 2, inner, half], [cx, cz + (half + g) / 2, inner, half]);
+      const hw = (W - g) / 2,
+        hd = (D - g) / 2;
+      if (Math.random() < 0.5) lots.push([cx - (hw + g) / 2, cz, hw, D], [cx + (hw + g) / 2, cz, hw, D]);
+      else lots.push([cx, cz - (hd + g) / 2, W, hd], [cx, cz + (hd + g) / 2, W, hd]);
     } else {
-      for (const sx of [-1, 1]) for (const sz of [-1, 1]) lots.push([cx + (sx * (half + g)) / 2, cz + (sz * (half + g)) / 2, half, half]);
+      const hw = (W - g) / 2,
+        hd = (D - g) / 2;
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) lots.push([cx + (sx * (hw + g)) / 2, cz + (sz * (hd + g)) / 2, hw, hd]);
     }
     for (const [x, z, w, d] of lots) {
-      if (Math.random() < 0.06) continue; // 空き地
+      if (Math.random() < 0.05) continue;
       const r = Math.random();
-      // 中心ほど高層ビルが多い
       const kind: BuildingKind =
-        ring <= 1
-          ? r < 0.3
-            ? "glass"
+        bl.kind === "mixed"
+          ? r < 0.35
+            ? "shop"
             : r < 0.6
+              ? "apartment"
+              : r < 0.85
+                ? "office"
+                : "garage"
+          : r < 0.32
+            ? "glass"
+            : r < 0.62
               ? "office"
-              : r < 0.75
+              : r < 0.76
                 ? "apartment"
                 : r < 0.88
                   ? "garage"
-                  : "shop"
-          : r < 0.14
-            ? "glass"
-            : r < 0.34
-              ? "office"
-              : r < 0.62
-                ? "apartment"
-                : r < 0.8
-                  ? "garage"
                   : "shop";
-      const bw = w * rand(0.75, 0.95);
-      const bd = d * rand(0.75, 0.95);
-      const px = x + rand(-1, 1),
-        pz = z + rand(-1, 1);
+      const bw = w * rand(0.8, 0.96);
+      const bd = d * rand(0.8, 0.96);
+      const px = x + rand(-0.6, 0.6),
+        pz = z + rand(-0.6, 0.6);
+      const front = this.frontOf(bl, px, pz);
       switch (kind) {
         case "glass":
-          this.buildTower(px, pz, bw, bd, ring);
+          this.buildTower(px, pz, bw, bd, ring, front);
           break;
         case "office":
-          this.buildBoxBuilding(px, pz, bw, bd, Math.round(rand(4, 11)), "office", "office");
+          this.buildBoxBuilding(px, pz, bw, bd, Math.round(bl.kind === "mixed" ? rand(3, 6) : rand(4, 11)), "office", "office", front);
           break;
         case "apartment":
-          this.buildApartment(px, pz, bw, bd);
+          this.buildApartment(px, pz, bw, bd, front);
           break;
         case "garage":
           this.buildGarage(px, pz, Math.min(bw, 34), Math.min(bd, 34));
           break;
         case "shop":
-          this.buildShops(px, pz, bw, bd);
+          this.buildShops(px, pz, bw, bd, front);
           break;
       }
+    }
+  }
+
+  /** 住宅街: 一戸建てとブロック塀、所々に小さなアパート */
+  private fillResidential(bl: Block) {
+    const x0 = bl.minX + SIDEWALK_W,
+      x1 = bl.maxX - SIDEWALK_W,
+      z0 = bl.minZ + SIDEWALK_W,
+      z1 = bl.maxZ - SIDEWALK_W;
+    const cell = 13;
+    const nx = Math.floor((x1 - x0) / cell),
+      nz = Math.floor((z1 - z0) / cell);
+    const cw = (x1 - x0) / nx,
+      cd = (z1 - z0) / nz;
+    const used = new Set<string>();
+    // 大きめの区画にアパートを1つ
+    if (Math.random() < 0.6) {
+      const a = (Math.random() * (nx - 1)) | 0,
+        c = (Math.random() * (nz - 1)) | 0;
+      for (const [da, dc] of [
+        [0, 0],
+        [1, 0],
+        [0, 1],
+        [1, 1],
+      ])
+        used.add(`${a + da},${c + dc}`);
+      const px = x0 + (a + 1) * cw,
+        pz = z0 + (c + 1) * cd;
+      this.buildApartment(px, pz, cw * 2 - 3, cd * 2 - 3, this.frontOf(bl, px, pz));
+    }
+    for (let a = 0; a < nx; a++)
+      for (let c = 0; c < nz; c++) {
+        if (used.has(`${a},${c}`)) continue;
+        const px = x0 + (a + 0.5) * cw,
+          pz = z0 + (c + 0.5) * cd;
+        if (Math.random() < 0.1) {
+          // 空き地に自販機
+          const f = this.frontOf(bl, px, pz);
+          const m = Matrix.RotationY(Math.atan2(f.x, f.z)).multiply(Matrix.Translation(px + f.x * (cw / 2 - 1), SIDEWALK_H, pz + f.z * (cd / 2 - 1)));
+          pick(this.props.vending).add(m);
+          continue;
+        }
+        this.buildHouse(px, pz, cw, cd, this.frontOf(bl, px, pz));
+      }
+  }
+
+  /** 一戸建て（見た目は thin instance、ブロック塀つき） */
+  private buildHouse(x: number, z: number, lotW: number, lotD: number, front: Vector3) {
+    const B = new Builder(x, z);
+    B.roofClutter = false;
+    const yaw = Math.atan2(front.x, front.z);
+    const typeA = Math.random() < 0.5;
+    const w = typeA ? 8 : 9.5,
+      d = typeA ? 9 : 7.5,
+      h = 5.6;
+    // 回転後の外接寸法（90 度単位なので入れ替えるだけ）
+    const side = Math.abs(front.x) > 0.5;
+    const ww = side ? d : w,
+      dd = side ? w : d;
+    const m = Matrix.RotationY(yaw).multiply(Matrix.Translation(x, SIDEWALK_H, z));
+    B.thin.push({ batch: typeA ? this.props.houseA : this.props.houseB, m });
+    B.solid(new Vector3(0, h / 2 + SIDEWALK_H, 0), new Vector3(ww, h, dd));
+    B.solid(new Vector3(0, h + 1.0 + SIDEWALK_H, 0), new Vector3(ww * 0.6, 2, dd * 0.6));
+    // ブロック塀（正面は門の分あける）
+    const hx = lotW / 2 - 0.3,
+      hz = lotD / 2 - 0.3;
+    const wall = (cx: number, cz: number, len: number, alongX: boolean) => {
+      if (len < 0.5) return;
+      const wm = Matrix.Scaling(len, 1, 1)
+        .multiply(Matrix.RotationY(alongX ? 0 : Math.PI / 2))
+        .multiply(Matrix.Translation(x + cx, SIDEWALK_H, z + cz));
+      B.thin.push({ batch: this.props.blockWall, m: wm });
+      B.solid(new Vector3(cx, 0.65 + SIDEWALK_H, cz), alongX ? new Vector3(len, 1.3, 0.2) : new Vector3(0.2, 1.3, len));
+    };
+    const gate = 3;
+    for (const [fx, fz] of [
+      [0, 1],
+      [0, -1],
+      [1, 0],
+      [-1, 0],
+    ]) {
+      const isFront = fx === front.x && fz === front.z;
+      if (fz !== 0) {
+        const zz = fz * hz;
+        if (isFront) {
+          wall(-(hx + gate / 2) / 2 - gate / 4, zz, hx - gate / 2, true);
+          wall((hx + gate / 2) / 2 + gate / 4, zz, hx - gate / 2, true);
+        } else wall(0, zz, hx * 2, true);
+      } else {
+        const xx = fx * hx;
+        if (isFront) {
+          wall(xx, -(hz + gate / 2) / 2 - gate / 4, hz - gate / 2, false);
+          wall(xx, (hz + gate / 2) / 2 + gate / 4, hz - gate / 2, false);
+        } else wall(xx, 0, hz * 2, false);
+      }
+    }
+    this.finish(B, "house", 260);
+  }
+
+  /** 公園: 芝生、遊歩道、池、木、ベンチ */
+  private buildPark(bl: Block) {
+    const x0 = bl.minX + SIDEWALK_W,
+      x1 = bl.maxX - SIDEWALK_W,
+      z0 = bl.minZ + SIDEWALK_W,
+      z1 = bl.maxZ - SIDEWALK_W;
+    const W = x1 - x0,
+      D = z1 - z0;
+    const cx = (x0 + x1) / 2,
+      cz = (z0 + z1) / 2;
+    const grass = MeshBuilder.CreateGround("parkGrass", { width: W, height: D }, this.scene);
+    grass.position.set(cx, SIDEWALK_H + 0.02, cz);
+    const gt = this.mats.grass;
+    for (const t of [gt.albedoTexture, gt.bumpTexture, gt.metallicTexture] as Texture[]) {
+      t.uScale = W / 8;
+      t.vScale = D / 8;
+    }
+    grass.material = gt;
+    grass.receiveShadows = true;
+    grass.freezeWorldMatrix();
+    // 十字の遊歩道
+    const paths = [uvBox(this.scene, W, 0.03, 3.5, 3), uvBox(this.scene, 3.5, 0.03, D, 3)];
+    paths[0].position.set(cx, SIDEWALK_H + 0.04, cz);
+    paths[1].position.set(cx, SIDEWALK_H + 0.04, cz);
+    const pm = Mesh.MergeMeshes(paths, true)!;
+    pm.material = this.mats.sidewalk;
+    pm.receiveShadows = true;
+    pm.freezeWorldMatrix();
+    // 池
+    const px = cx + W * 0.24,
+      pz = cz - D * 0.24;
+    const pond = MeshBuilder.CreateDisc("pond", { radius: Math.min(W, D) * 0.17, tessellation: 32 }, this.scene);
+    pond.rotation.x = Math.PI / 2;
+    pond.scaling.x = 1.4;
+    pond.position.set(px, SIDEWALK_H + 0.05, pz);
+    pond.material = this.mats.water;
+    pond.freezeWorldMatrix();
+    // 木（遊歩道と池を避ける）
+    for (let k = 0; k < 26; k++) {
+      const tx = rand(x0 + 2, x1 - 2),
+        tz = rand(z0 + 2, z1 - 2);
+      if (Math.abs(tx - cx) < 4 || Math.abs(tz - cz) < 4) continue;
+      if (Math.hypot((tx - px) / 1.4, tz - pz) < Math.min(W, D) * 0.2) continue;
+      this.addTree(tx, tz, rand(0.9, 1.4));
+    }
+    // ベンチ
+    for (const [bx, bz, r] of [
+      [cx + 6, cz + 2.8, Math.PI],
+      [cx - 6, cz + 2.8, Math.PI],
+      [cx + 6, cz - 2.8, 0],
+      [cx - 6, cz - 2.8, 0],
+      [cx + 2.8, cz + 8, -Math.PI / 2],
+      [cx - 2.8, cz - 8, Math.PI / 2],
+    ])
+      this.props.bench.add(Matrix.RotationY(r).multiply(Matrix.Translation(bx, SIDEWALK_H, bz)));
+    // 公衆トイレ（小さな遮蔽物）
+    const B = new Builder(cx - W * 0.3, cz + D * 0.3);
+    const hut = uvBox(this.scene, 5, 3, 4, 3);
+    hut.material = this.mats.plaster;
+    B.part(hut, new Vector3(0, 1.5, 0), new Vector3(5, 3, 4));
+    const rf = MeshBuilder.CreateBox("hutRoof", { width: 6, height: 0.3, depth: 5 }, this.scene);
+    rf.material = this.mats.darkMetal;
+    B.part(rf, new Vector3(0, 3.15, 0), new Vector3(6, 0.3, 5));
+    B.roofClutter = false;
+    this.finish(B, "hut", 300);
+  }
+
+  /** 木を1本植える（幹だけ当たり判定あり） */
+  private addTree(x: number, z: number, scale = 1) {
+    const m = Matrix.Scaling(scale, scale, scale)
+      .multiply(Matrix.RotationY(Math.random() * Math.PI * 2))
+      .multiply(Matrix.Translation(x, SIDEWALK_H, z));
+    pick(this.props.trees).add(m);
+  }
+
+  /** 大通り: 中央分離帯（植え込みと街路樹）とガードレール */
+  private buildAvenue() {
+    const kz = LINES.indexOf(AVENUE_Z);
+    const half = ROAD_W_Z[kz] / 2;
+    const median = uvBox(this.scene, 504, 0.25, 3, 3);
+    median.position.set(0, 0.125, AVENUE_Z);
+    median.material = this.mats.sidewalk;
+    median.receiveShadows = true;
+    median.freezeWorldMatrix();
+    const hedge = MeshBuilder.CreateBox("hedge", { width: 504, height: 0.7, depth: 1.6 }, this.scene);
+    hedge.position.set(0, 0.6, AVENUE_Z);
+    const hm = new PBRMaterial("hedgeMat", this.scene);
+    hm.albedoColor = new Color3(0.12, 0.25, 0.08);
+    hm.roughness = 0.9;
+    hm.metallic = 0;
+    hedge.material = hm;
+    hedge.receiveShadows = true;
+    hedge.freezeWorldMatrix();
+    for (let x = -246; x <= 246; x += 12) {
+      // 交差点の中は木を植えない
+      if (LINES.some((l) => Math.abs(x - l) < 10)) continue;
+      this.addTree(x, AVENUE_Z, 1.15);
+    }
+    // 歩道側のガードレール（横断歩道の位置はあける）
+    for (const sz of [-1, 1]) {
+      const z = AVENUE_Z + sz * (half - 0.4);
+      for (let x = -250; x < 250; x += 4) {
+        if (LINES.some((l) => Math.abs(x + 2 - l) < 16)) continue;
+        this.props.rail.add(Matrix.Translation(x + 2, 0, z));
+      }
+    }
+  }
+
+  /** 高架の高速道路（x = HIGHWAY_X の道路の上） */
+  private buildHighway() {
+    const top = 12.5,
+      deckW = 20,
+      thick = 1.4;
+    for (let z0 = -250; z0 < 250; z0 += 50) {
+      const B = new Builder(HIGHWAY_X, z0 + 25);
+      B.roofClutter = false;
+      const deck = uvBox(this.scene, deckW, thick, 50, 4);
+      deck.material = this.concrete;
+      B.part(deck, new Vector3(0, top - thick / 2, 0), new Vector3(deckW, thick, 50));
+      for (const sx of [-1, 1]) {
+        const bar = uvBox(this.scene, 0.4, 1.1, 50, 2);
+        bar.material = this.mats.garageWall;
+        B.part(bar, new Vector3(sx * (deckW / 2 - 0.2), top + 0.55, 0), new Vector3(0.4, 1.1, 50));
+      }
+      // 橋脚（T 字）
+      for (const pz of [-12.5, 12.5]) {
+        const col = uvBox(this.scene, 2.6, top - thick - 1.2, 2.6, 3);
+        col.material = this.concrete;
+        B.part(col, new Vector3(0, (top - thick - 1.2) / 2, pz), new Vector3(2.6, top - thick - 1.2, 2.6));
+        const cap = uvBox(this.scene, 16, 1.2, 2.8, 3);
+        cap.material = this.concrete;
+        B.part(cap, new Vector3(0, top - thick - 0.6, pz), new Vector3(16, 1.2, 2.8));
+      }
+      // 白線
+      const lines: Mesh[] = [];
+      for (const lx of [-3.3, 3.3]) {
+        for (let dz = -24; dz < 25; dz += 8) {
+          const l = MeshBuilder.CreateBox("hl", { width: 0.15, height: 0.02, depth: 4 }, this.scene);
+          l.position.set(lx, top + 0.01, dz);
+          lines.push(l);
+        }
+      }
+      const lm = Mesh.MergeMeshes(lines, true)!;
+      lm.material = this.mats.marking;
+      B.meshes.push(lm);
+      this.finish(B, "highway", 1e12);
+    }
+  }
+
+  /** 歩道橋（大通りをまたぐ。両端に階段） */
+  private buildFootbridge(x: number) {
+    const kz = LINES.indexOf(AVENUE_Z);
+    const half = ROAD_W_Z[kz] / 2;
+    const zN = AVENUE_Z + half + 2.2,
+      zS = AVENUE_Z - half - 2.2;
+    const top = 5.6,
+      width = 3;
+    const B = new Builder(x, AVENUE_Z);
+    B.roofClutter = false;
+    const len = zN - zS + 3;
+    const deck = uvBox(this.scene, width, 0.35, len, 3);
+    deck.material = this.steel;
+    B.part(deck, new Vector3(0, top - 0.175, 0), new Vector3(width, 0.35, len));
+    for (const sx of [-1, 1]) {
+      const rail = uvBox(this.scene, 0.12, 1.1, len, 2);
+      rail.material = this.steel;
+      B.part(rail, new Vector3(sx * (width / 2 - 0.06), top + 0.55, 0), new Vector3(0.12, 1.1, len));
+    }
+    for (const pz of [zN - AVENUE_Z, zS - AVENUE_Z, 0]) {
+      const col = uvBox(this.scene, 0.5, top - 0.35, 0.5, 2);
+      col.material = this.steel;
+      B.part(col, new Vector3(0, (top - 0.35) / 2, pz), new Vector3(0.5, top - 0.35, 0.5));
+    }
+    // 階段（x 方向に下りる）
+    const rise = 0.4,
+      run = 0.5;
+    const steps = Math.round(top / rise);
+    for (const ez of [zN - AVENUE_Z + 1.5, zS - AVENUE_Z - 1.5]) {
+      for (let k = 1; k <= steps; k++) {
+        const h = k * rise;
+        const st = uvBox(this.scene, run, h, width, 2);
+        st.material = this.steel;
+        B.part(st, new Vector3(width / 2 + (steps - k + 0.5) * run, h / 2, ez), new Vector3(run, h, width));
+      }
+      const land = uvBox(this.scene, width, 0.35, 3, 2);
+      land.material = this.steel;
+      B.part(land, new Vector3(0, top - 0.175, ez), new Vector3(width, 0.35, 3));
+    }
+    this.finish(B, "bridge", 4000);
+  }
+
+  /** 電柱と電線・信号機・自販機 */
+  private buildStreetFurniture() {
+    // 電柱: 住宅街と商店街の街区のまわり
+    for (const bl of this.blocks) {
+      if (bl.kind !== "residential" && bl.kind !== "mixed") continue;
+      const inset = 0.8;
+      const edges: [Vector3, Vector3][] = [
+        [new Vector3(bl.minX + inset, 0, bl.minZ + inset), new Vector3(bl.maxX - inset, 0, bl.minZ + inset)],
+        [new Vector3(bl.maxX - inset, 0, bl.minZ + inset), new Vector3(bl.maxX - inset, 0, bl.maxZ - inset)],
+        [new Vector3(bl.maxX - inset, 0, bl.maxZ - inset), new Vector3(bl.minX + inset, 0, bl.maxZ - inset)],
+        [new Vector3(bl.minX + inset, 0, bl.maxZ - inset), new Vector3(bl.minX + inset, 0, bl.minZ + inset)],
+      ];
+      for (const [a, b] of edges) {
+        // 大通り沿いには電柱を立てない（無電柱化）
+        if (Math.abs(a.z - b.z) < 1 && Math.abs(Math.abs(a.z - AVENUE_Z) - ROAD_W_Z[3] / 2) < 2) continue;
+        const len = Vector3.Distance(a, b);
+        const n = Math.max(1, Math.round(len / 22));
+        const dir = b.subtract(a).normalize();
+        const yaw = Math.atan2(dir.x, dir.z) + Math.PI / 2;
+        let prev: Vector3 | null = null;
+        for (let k = 0; k <= n; k++) {
+          if (k === n && n > 1) break; // 角は次の辺の始点と共有
+          const p = Vector3.Lerp(a, b, k / n);
+          this.props.pole.add(Matrix.RotationY(yaw).multiply(Matrix.Translation(p.x, SIDEWALK_H, p.z)));
+          if (prev) this.addWires(prev, p, yaw);
+          prev = p;
+        }
+        if (prev) this.addWires(prev, b, yaw);
+      }
+    }
+    // 信号機: 大通りの交差点
+    for (const x of LINES) {
+      const half = ROAD_W_Z[3] / 2;
+      this.props.trafficLight.add(Matrix.RotationY(-Math.PI / 2).multiply(Matrix.Translation(x + 9, SIDEWALK_H, AVENUE_Z + half + 1)));
+      this.props.trafficLight.add(Matrix.RotationY(Math.PI / 2).multiply(Matrix.Translation(x - 9, SIDEWALK_H, AVENUE_Z - half - 1)));
+    }
+    // 自販機: 商店街の歩道
+    for (const bl of this.blocks) {
+      if (bl.kind !== "mixed") continue;
+      for (let k = 0; k < 2; k++) {
+        const x = rand(bl.minX + 6, bl.maxX - 6);
+        const z = Math.random() < 0.5 ? bl.minZ + 1.2 : bl.maxZ - 1.2;
+        const yaw = z < (bl.minZ + bl.maxZ) / 2 ? Math.PI : 0;
+        pick(this.props.vending).add(Matrix.RotationY(yaw).multiply(Matrix.Translation(x, SIDEWALK_H, z)));
+        pick(this.props.vending).add(Matrix.RotationY(yaw).multiply(Matrix.Translation(x + 1.05, SIDEWALK_H, z)));
+      }
+    }
+  }
+
+  private addWires(a: Vector3, b: Vector3, yaw: number) {
+    const off = new Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+    for (const [h, o] of [
+      [9.25, 0.9],
+      [9.25, -0.9],
+      [8.45, 0.6],
+    ]) {
+      const pa = a.add(off.scale(o)).addInPlace(new Vector3(0, h + SIDEWALK_H, 0));
+      const pb = b.add(off.scale(o)).addInPlace(new Vector3(0, h + SIDEWALK_H, 0));
+      const t = MeshBuilder.CreateTube("wire", { path: wirePath(pa, pb, 0.6, 6), radius: 0.03, tessellation: 3 }, this.scene);
+      this.wires.push(t);
     }
   }
 
@@ -328,9 +798,8 @@ export class City {
     multi.subMaterials.push(facade, this.mats.roof);
     mesh.subMeshes = [];
     const verts = mesh.getTotalVertices();
-    new SubMesh(0, 0, verts, 0, 24, mesh);
-    new SubMesh(1, 0, verts, 24, 6, mesh);
-    new SubMesh(0, 0, verts, 30, 6, mesh);
+    new SubMesh(0, 0, verts, 0, 24, mesh); // 側面
+    new SubMesh(1, 0, verts, 24, 12, mesh); // 上面＋底面（底面は見えない）
     mesh.material = multi;
     return mesh;
   }
@@ -340,8 +809,10 @@ export class City {
     return Math.max(span * 2, Math.round(v / span) * span);
   }
 
-  private buildBoxBuilding(x: number, z: number, w: number, d: number, floors: number, style: FacadeStyle, kind: BuildingKind) {
+  private buildBoxBuilding(x: number, z: number, w: number, d: number, floors: number, style: FacadeStyle, kind: BuildingKind, front?: Vector3) {
     const B = new Builder(x, z);
+    if (front) B.front = front;
+    B.signs = Math.random() < 0.5;
     w = this.snap(w, style);
     d = this.snap(d, style);
     const h = Math.max(2, floors) * (FACADE_SPECS[style].tileH / 2);
@@ -350,13 +821,14 @@ export class City {
   }
 
   /** ガラスの高層ビル。半分はセットバック（低層部の上に細い塔） */
-  private buildTower(x: number, z: number, w: number, d: number, ring: number) {
+  private buildTower(x: number, z: number, w: number, d: number, ring: number, front?: Vector3) {
     const floors = Math.round(rand(9, 18) - ring);
     if (Math.random() < 0.5 || w < 20 || d < 20) {
-      this.buildBoxBuilding(x, z, w, d, floors, "glass", "glass");
+      this.buildBoxBuilding(x, z, w, d, floors, "glass", "glass", front);
       return;
     }
     const B = new Builder(x, z);
+    if (front) B.front = front;
     const fh = FACADE_SPECS.office.tileH / 2;
     const podW = this.snap(w, "office"),
       podD = this.snap(d, "office");
@@ -370,8 +842,9 @@ export class City {
   }
 
   /** レンガのアパート。通り側（±z）にベランダが並ぶ */
-  private buildApartment(x: number, z: number, w: number, d: number) {
+  private buildApartment(x: number, z: number, w: number, d: number, front?: Vector3) {
     const B = new Builder(x, z);
+    if (front) B.front = front;
     const spec = FACADE_SPECS.brick;
     w = this.snap(w, "brick");
     d = this.snap(Math.min(d, 18), "brick") - 2.8; // ベランダの分だけ奥行きを詰める
@@ -379,7 +852,7 @@ export class City {
     const fh = spec.tileH / 2;
     const h = floors * fh;
     B.part(this.facadeBox(w, h, d, "brick"), new Vector3(0, h / 2, 0), new Vector3(w, h, d));
-    const side = Math.random() < 0.5 ? 1 : -1;
+    const side = front && Math.abs(front.z) > 0.5 ? Math.sign(front.z) : Math.random() < 0.5 ? 1 : -1;
     const bd = 1.4; // ベランダの奥行き
     const slabs: Mesh[] = [];
     const rails: Mesh[] = [];
@@ -513,24 +986,76 @@ export class City {
   }
 
   /** 低層の商店（2〜3軒並び、ひさし付き） */
-  private buildShops(x: number, z: number, w: number, d: number) {
+  private buildShops(x: number, z: number, w: number, d: number, front?: Vector3) {
     const B = new Builder(x, z);
     w = this.snap(w, "office");
     d = this.snap(Math.min(d, 14), "office");
     const fh = FACADE_SPECS.office.tileH / 2;
     const h = Math.round(rand(1, 2)) * fh;
     B.part(this.facadeBox(w, h, d, Math.random() < 0.5 ? "office" : "brick"), new Vector3(0, h / 2, 0), new Vector3(w, h, d));
-    const side = Math.random() < 0.5 ? 1 : -1;
+    const side = front && Math.abs(front.z) > 0.5 ? Math.sign(front.z) : Math.random() < 0.5 ? 1 : -1;
+    B.front = new Vector3(0, 0, side);
+    B.signs = true;
+    // 店名の横看板と、閉まっているシャッター
+    const yawF = side > 0 ? 0 : Math.PI;
+    B.thin.push({
+      batch: pick(this.props.signsH),
+      m: Matrix.RotationY(yawF).multiply(Matrix.Translation(x, 3.9, z + side * (d / 2 + 0.25))),
+    });
+    for (let sx = -w / 2 + 2.5; sx < w / 2 - 2; sx += 4.5) {
+      if (Math.random() < 0.5) continue;
+      B.thin.push({
+        batch: this.props.shutter,
+        m: Matrix.RotationY(yawF).multiply(Matrix.Translation(x + sx, 0.1, z + side * (d / 2 + 0.12))),
+      });
+    }
     // 店先のガラス
-    const front = MeshBuilder.CreateBox("shopFront", { width: w - 0.6, height: 2.4, depth: 0.1 }, this.scene);
-    front.material = this.mats.glassDark;
-    B.part(front, new Vector3(0, 1.4, side * (d / 2 + 0.06)), Vector3.Zero(), false);
+    const glass = MeshBuilder.CreateBox("shopFront", { width: w - 0.6, height: 2.4, depth: 0.1 }, this.scene);
+    glass.material = this.mats.glassDark;
+    B.part(glass, new Vector3(0, 1.4, side * (d / 2 + 0.06)), Vector3.Zero(), false);
     // ひさし
     const aw = MeshBuilder.CreateBox("awning", { width: w - 0.4, height: 0.12, depth: 1.8 }, this.scene);
     aw.rotation.x = side * 0.18;
     aw.material = pick(this.awnings);
     B.part(aw, new Vector3(0, 3.0, side * (d / 2 + 0.9)), new Vector3(w - 0.4, 0.2, 1.8));
     this.finish(B, "shop");
+  }
+
+  /** 屋上の室外機・給水タンク・アンテナ・広告看板 */
+  private addRoofClutter(B: Builder, kind: BuildingKind) {
+    let top: { c: Vector3; s: Vector3 } | null = null;
+    for (const s of B.boxes) if (!top || s.c.y + s.s.y / 2 > top.c.y + top.s.y / 2) top = s;
+    if (!top) return;
+    const y = top.c.y + top.s.y / 2;
+    const hx = top.s.x / 2 - 1.5,
+      hz = top.s.z / 2 - 1.5;
+    if (hx < 1 || hz < 1) return;
+    const at = (lx: number, lz: number, yaw: number) =>
+      Matrix.RotationY(yaw).multiply(Matrix.Translation(B.cx + top!.c.x + lx, y, B.cz + top!.c.z + lz));
+    const nAc = Math.min(8, Math.round((hx * hz) / 25) + 1);
+    for (let k = 0; k < nAc; k++) B.thin.push({ batch: this.props.ac, m: at(rand(-hx, hx), rand(-hz, hz), ((Math.random() * 4) | 0) * (Math.PI / 2)) });
+    if (Math.random() < 0.45 && hx > 3 && hz > 3) B.thin.push({ batch: this.props.tank, m: at(rand(-hx + 2, hx - 2), rand(-hz + 2, hz - 2), 0) });
+    if (Math.random() < 0.35) B.thin.push({ batch: this.props.antenna, m: at(rand(-hx, hx), rand(-hz, hz), Math.random() * 3) });
+    if (kind !== "glass" && y < 40 && hx > 7 && Math.random() < 0.18) {
+      const f = B.front;
+      B.thin.push({ batch: pick(this.props.billboards), m: at(f.x * (hx - 1), f.z * (hz - 1), Math.atan2(f.x, f.z)) });
+    }
+  }
+
+  /** 通りに突き出した縦看板 */
+  private addSign(B: Builder, hw: number, hd: number, height: number) {
+    const f = B.front;
+    const s = new Vector3(-f.z, 0, f.x);
+    const alongF = Math.abs(f.x) > 0.5 ? hw : hd;
+    const alongS = Math.abs(f.x) > 0.5 ? hd : hw;
+    const y = 4.6 + rand(0, Math.max(0, Math.min(8, height - 11)));
+    const side = Math.random() < 0.5 ? 1 : -1;
+    const lx = f.x * (alongF + 0.75) + s.x * side * (alongS - 1.4);
+    const lz = f.z * (alongF + 0.75) + s.z * side * (alongS - 1.4);
+    B.thin.push({
+      batch: pick(this.props.signsV),
+      m: Matrix.RotationY(Math.atan2(s.x, s.z)).multiply(Matrix.Translation(B.cx + lx, y, B.cz + lz)),
+    });
   }
 
   /** Builder から建物を登録（メッシュの親子付け・当たり判定・物理ボディ） */
@@ -563,7 +1088,11 @@ export class City {
       maxHp: hp,
       state: "standing",
       collapseT: 0,
+      thin: [],
     };
+    if (B.roofClutter && kind !== "garage") this.addRoofClutter(B, kind);
+    if (B.signs && height > 9) this.addSign(B, hw, hd, height);
+    for (const t of B.thin) b.thin.push({ batch: t.batch, idx: t.batch.add(t.m) });
     for (const m of B.meshes) {
       m.parent = root;
       m.receiveShadows = true;
@@ -599,6 +1128,7 @@ export class City {
 
   // ------------------------------------------------------------------ 道路の装飾・車
   private buildMarkings() {
+    // 道路の白線（中央線・車線）と横断歩道。thin instance で軽量に描画。
     const dash = MeshBuilder.CreateBox("dash", { width: 0.18, height: 0.02, depth: 3 }, this.scene);
     dash.material = this.mats.marking;
     dash.receiveShadows = true;
@@ -607,27 +1137,40 @@ export class City {
     stripe.receiveShadows = true;
     const dm: Matrix[] = [];
     const sm: Matrix[] = [];
-    const lines: number[] = [];
-    for (let k = -BLOCK_RANGE; k <= BLOCK_RANGE + 1; k++) lines.push(k * PITCH - PITCH / 2);
-    const extent = (BLOCK_RANGE + 0.5) * PITCH;
     const rotY = Matrix.RotationY(Math.PI / 2);
-    for (const l of lines) {
+    const inCross = (p: number, widths: number[]) => LINES.some((l, k) => Math.abs(p - l) < widths[k] / 2 + 5);
+    const extent = 250;
+    // 南北の道路（x = LINES[k]）
+    LINES.forEach((l, k) => {
       for (let p = -extent; p < extent; p += 7) {
-        const local = (((p + PITCH / 2) % PITCH) + PITCH) % PITCH;
-        if (local < ROAD / 2 + 4 || local > PITCH - ROAD / 2 - 4) continue;
+        if (inCross(p, ROAD_W_Z)) continue;
         dm.push(Matrix.Translation(l, 0.012, p));
-        dm.push(rotY.multiply(Matrix.Translation(p, 0.012, l)));
       }
-    }
-    for (const lx of lines)
-      for (const lz of lines) {
-        for (let s = -6; s <= 6; s += 1.2) {
-          sm.push(Matrix.Translation(lx + s, 0.012, lz + ROAD / 2 + 3));
-          sm.push(Matrix.Translation(lx + s, 0.012, lz - ROAD / 2 - 3));
-          sm.push(rotY.multiply(Matrix.Translation(lx + ROAD / 2 + 3, 0.012, lz + s)));
-          sm.push(rotY.multiply(Matrix.Translation(lx - ROAD / 2 - 3, 0.012, lz + s)));
+      void k;
+    });
+    // 東西の道路（z = LINES[k]）。大通りは片側2車線の車線境界線
+    LINES.forEach((l, k) => {
+      const offs = ROAD_W_Z[k] > 20 ? [-ROAD_W_Z[k] / 4 - 1, ROAD_W_Z[k] / 4 + 1] : [0];
+      for (let p = -extent; p < extent; p += 7) {
+        if (inCross(p, ROAD_W_X)) continue;
+        for (const o of offs) dm.push(rotY.multiply(Matrix.Translation(p, 0.012, l + o)));
+      }
+    });
+    // 横断歩道（交差点の4辺）
+    LINES.forEach((lx, kx) =>
+      LINES.forEach((lz, kz) => {
+        const hx = ROAD_W_X[kx] / 2,
+          hz = ROAD_W_Z[kz] / 2;
+        for (let s2 = -hx + 1; s2 <= hx - 1; s2 += 1.2) {
+          sm.push(Matrix.Translation(lx + s2, 0.012, lz + hz + 3));
+          sm.push(Matrix.Translation(lx + s2, 0.012, lz - hz - 3));
         }
-      }
+        for (let s2 = -hz + 1; s2 <= hz - 1; s2 += 1.2) {
+          sm.push(rotY.multiply(Matrix.Translation(lx + hx + 3, 0.012, lz + s2)));
+          sm.push(rotY.multiply(Matrix.Translation(lx - hx - 3, 0.012, lz + s2)));
+        }
+      }),
+    );
     dash.thinInstanceAdd(dm);
     stripe.thinInstanceAdd(sm);
     dash.freezeWorldMatrix();
@@ -641,15 +1184,20 @@ export class City {
     head.material = this.mats.lampGlow;
     const pm: Matrix[] = [];
     const hm: Matrix[] = [];
-    for (const [cx, cz, i, j] of this.blockCenters()) {
-      if (i === 0 && j === 0) continue;
-      const e = BLOCK / 2 - 0.8;
-      for (const s of [-1, 1]) {
-        for (const along of [-14, 14]) {
-          pm.push(Matrix.Translation(cx + along, 3.5, cz + s * e));
-          hm.push(Matrix.Translation(cx + along, 7, cz + s * (e + 0.6)));
-          pm.push(Matrix.Translation(cx + s * e, 3.5, cz + along));
-          hm.push(Matrix.RotationY(Math.PI / 2).multiply(Matrix.Translation(cx + s * (e + 0.6), 7, cz + along)));
+    for (const bl of this.blocks) {
+      if (bl.kind === "plaza" || bl.kind === "residential") continue;
+      const cx = (bl.minX + bl.maxX) / 2,
+        cz = (bl.minZ + bl.maxZ) / 2;
+      for (const along of [-14, 14]) {
+        for (const z of [bl.minZ + 0.8, bl.maxZ - 0.8]) {
+          const s2 = z < cz ? -1 : 1;
+          pm.push(Matrix.Translation(cx + along, 3.5, z));
+          hm.push(Matrix.Translation(cx + along, 7, z + s2 * 0.6));
+        }
+        for (const x of [bl.minX + 0.8, bl.maxX - 0.8]) {
+          const s2 = x < cx ? -1 : 1;
+          pm.push(Matrix.Translation(x, 3.5, cz + along));
+          hm.push(Matrix.RotationY(Math.PI / 2).multiply(Matrix.Translation(x + s2 * 0.6, 7, cz + along)));
         }
       }
     }
@@ -691,23 +1239,22 @@ export class City {
   /** 路上駐車の車: 爆発で吹き飛ぶよう Havok の動的ボディ（初期はスリープ） */
   private buildCars() {
     let n = 0;
-    for (const [cx, cz] of this.blockCenters()) {
+    for (const bl of this.blocks) {
+      if (bl.kind === "plaza") continue;
       const count = (Math.random() * 3) | 0;
       for (let k = 0; k < count; k++) {
         const side = (Math.random() * 4) | 0;
-        const along = rand(-20, 20);
-        const off = BLOCK / 2 + 2.2;
-        let x = cx,
-          z = cz,
+        let x = 0,
+          z = 0,
           ry = 0;
-        if (side === 0) (x = cx + along), (z = cz + off), (ry = Math.PI / 2 + (Math.random() < 0.5 ? 0 : Math.PI));
-        else if (side === 1) (x = cx + along), (z = cz - off), (ry = Math.PI / 2);
-        else if (side === 2) (x = cx + off), (z = cz + along), (ry = 0);
-        else (x = cx - off), (z = cz + along), (ry = Math.PI);
-        if (Math.abs(x) < 20 && Math.abs(z) < 30) continue;
+        if (side === 0) (x = rand(bl.minX + 8, bl.maxX - 8)), (z = bl.maxZ + 2.2), (ry = Math.PI / 2);
+        else if (side === 1) (x = rand(bl.minX + 8, bl.maxX - 8)), (z = bl.minZ - 2.2), (ry = -Math.PI / 2);
+        else if (side === 2) (x = bl.maxX + 2.2), (z = rand(bl.minZ + 8, bl.maxZ - 8)), (ry = 0);
+        else (x = bl.minX - 2.2), (z = rand(bl.minZ + 8, bl.maxZ - 8)), (ry = Math.PI);
+        if (Math.abs(x - HIGHWAY_X) < 12) continue;
         const inst = pick(this.carTemplates).createInstance(`car_${n++}`);
         inst.position.set(x, 0.8, z);
-        inst.rotationQuaternion = Quaternion.FromEulerAngles(0, ry + rand(-0.1, 0.1), 0);
+        inst.rotationQuaternion = Quaternion.FromEulerAngles(0, ry + rand(-0.08, 0.08), 0);
         const body = new PhysicsBody(inst, PhysicsMotionType.DYNAMIC, true, this.scene);
         const shape = new PhysicsShapeBox(new Vector3(0, 0.1, 0), Quaternion.Identity(), new Vector3(1.8, 1.4, 4.4), this.scene);
         shape.filterMembershipMask = COL_STATIC;
@@ -817,10 +1364,7 @@ export class City {
   }
 
   sidewalkAt(x: number, z: number) {
-    const lx = (((x + PITCH / 2) % PITCH) + PITCH) % PITCH;
-    const lz = (((z + PITCH / 2) % PITCH) + PITCH) % PITCH;
-    const inBlock = lx > ROAD / 2 && lx < PITCH - ROAD / 2 && lz > ROAD / 2 && lz < PITCH - ROAD / 2;
-    return inBlock && Math.abs(x) < (BLOCK_RANGE + 0.5) * PITCH && Math.abs(z) < (BLOCK_RANGE + 0.5) * PITCH;
+    return this.blockAt(x, z) !== null;
   }
 
   /**
@@ -963,8 +1507,20 @@ export class City {
       const sink = b.height * k * k * 1.05;
       b.root.position.y = -sink;
       const shake = (1 - k) * 0.4;
-      b.root.position.x = b.cx + (Math.random() - 0.5) * shake;
-      b.root.position.z = b.cz + (Math.random() - 0.5) * shake;
+      const sx = (Math.random() - 0.5) * shake,
+        sz = (Math.random() - 0.5) * shake;
+      b.root.position.x = b.cx + sx;
+      b.root.position.z = b.cz + sz;
+      if (b.thin.length) {
+        const off = Matrix.Translation(sx, -sink, sz);
+        const touched = new Set<PropBatch>();
+        for (const t of b.thin) {
+          if (k >= 1) t.batch.hide(t.idx);
+          else t.batch.setMatrix(t.idx, t.batch.base(t.idx).multiply(off), false);
+          touched.add(t.batch);
+        }
+        for (const bt of touched) bt.mesh.thinInstanceBufferUpdated("matrix");
+      }
       if (k >= 1) {
         b.state = "gone";
         b.root.dispose();

@@ -9,6 +9,10 @@ License: https://polyhaven.com/license
 | textures/pavement_* | concrete_pavement | 歩道・屋上・広場 |
 | textures/facade_* | concrete_panels | オフィスビル外壁（窓は Canvas で合成） |
 | textures/brick_* | brick_wall_001 | レンガのアパート外壁（窓は Canvas で合成） |
+| textures/grass_* | aerial_grass_rock | 公園の芝生 |
+| textures/rooftile_* | ceramic_roof_01 | 住宅の瓦屋根 |
+| textures/plaster_* | beige_wall_001 | 住宅の外壁 |
+| textures/corrugated_* | corrugated_iron | シャッター・トタン |
 | hdri/sky_1k.hdr | kloofendal_48d_partly_cloudy_puresky (1K HDR) | 環境光・反射 |
 | hdri/sky_4k.jpg | 同上の tonemapped JPG を 4096x2048 に縮小 | 空の背景 |
 

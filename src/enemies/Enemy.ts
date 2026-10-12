@@ -10,7 +10,7 @@
 import { Matrix, Quaternion, TransformNode, Vector3 } from "@babylonjs/core";
 import type { EnemyDef } from "../data/enemies";
 import type { GameContext } from "../core/GameContext";
-import { Ragdoll, RigPart } from "../core/Physics";
+import { Ragdoll, RigidCorpse, RigPart } from "../core/Physics";
 import { GRAVITY } from "../core/Physics";
 import { angleDiff, clamp, damp } from "../core/MathUtil";
 
@@ -105,7 +105,7 @@ export abstract class Enemy {
     if (this.hp <= 0) {
       this.alive = false;
       this.ctx.effects.gore(this.center(), this.kind);
-      this.onDeath(dir, knock + amount * 0.04);
+      this.onDeath(dir, Math.min(40, knock + amount * 0.04));
       if (Math.random() < this.def.dropRate) this.ctx.dropItem(this.center());
       return;
     }
@@ -113,6 +113,31 @@ export abstract class Enemy {
   }
 
   protected onKnock(_dir: Vector3, _knock: number, _point: Vector3) {}
+
+  /**
+   * 死亡ポーズのまま固まった1つの剛体にして物理演算へ（地上の巨大生物用）。
+   * 死骸同士の重なりは物理演算で押し出されて軽く跳ねる。
+   */
+  protected rigidize(velocity: Vector3, spin = 1.5) {
+    this.deathPose();
+    // 地面にめり込まないよう、一番低いパーツが地面の少し上に来るまで持ち上げる
+    this.root.computeWorldMatrix(true);
+    let low = Infinity;
+    const tmp = new Vector3();
+    for (const p of this.rig) {
+      p.node.computeWorldMatrix(true);
+      Vector3.TransformCoordinatesToRef(p.center, p.node.getWorldMatrix(), tmp);
+      low = Math.min(low, tmp.y - Math.min(p.size.x, p.size.y, p.size.z) * 0.5);
+    }
+    const floor = this.ctx.city.heightAt(this.position.x, this.position.z, this.position.y + 1);
+    if (low < floor + 0.15) this.root.position.y += floor + 0.15 - low;
+    const c = new RigidCorpse(this.ctx.scene, this.rig, { velocity, spin });
+    this.ctx.addCorpse(c, [c.root]);
+    this.root.dispose();
+  }
+
+  /** 死亡ポーズ（各敵で上書き） */
+  protected deathPose() {}
 
   /** パーツを物理演算に引き渡してラグドール化 */
   protected ragdollize(velocity: Vector3, spin = 2) {

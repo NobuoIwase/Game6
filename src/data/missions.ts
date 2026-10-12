@@ -117,6 +117,7 @@ export const MISSIONS: MissionDef[] = [
           { type: "spider", count: 10, at: [170, 120], spread: 28, active: true },
           { type: "ant", count: 10, at: [-170, -150], spread: 25, active: true },
           { type: "flyer", count: 7, at: [180, -180], spread: 10, active: true, formation: "line" },
+          { type: "carrier", count: 1, at: [-60, -110], spread: 0, active: true },
         ],
         radio: [
           { who: OP, text: "新たな敵影！ 蜘蛛型が北東から接近中！" },

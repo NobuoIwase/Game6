@@ -13,6 +13,7 @@ import {
   PhysicsConstraintAxis,
   PhysicsMotionType,
   PhysicsShapeBox,
+  PhysicsShapeContainer,
   Quaternion,
   Scene,
   TransformNode,
@@ -190,4 +191,83 @@ export class Ragdoll {
     this.constraints = [];
     this.bodies = [];
   }
+}
+
+/**
+ * 死亡ポーズのまま固まった死骸（1つの剛体）。
+ * パーツの親子関係は保ったまま、ルートパーツに全パーツの箱を合成した形状を付ける。
+ * 死骸同士も衝突するので、重なって出現すると押し出し合って軽く跳ねる。
+ */
+export class RigidCorpse {
+  bodies: PhysicsBody[] = [];
+  disposed = false;
+  readonly root: TransformNode;
+
+  constructor(
+    scene: Scene,
+    readonly parts: RigPart[],
+    opts: RagdollOptions = {},
+  ) {
+    for (const p of parts) p.node.computeWorldMatrix(true);
+    const root = parts[0].node;
+    const rootWorld = root.getWorldMatrix().clone();
+    const inv = rootWorld.clone().invert();
+    root.setParent(null);
+    if (!root.rotationQuaternion) root.rotationQuaternion = Quaternion.FromEulerVector(root.rotation);
+    root.scaling.set(1, 1, 1);
+    this.root = root;
+    const cont = new PhysicsShapeContainer(scene);
+    let mass = 0;
+    for (const p of parts) {
+      const rel = p.node === root ? Matrix.Identity() : p.node.getWorldMatrix().multiply(inv);
+      const q = new Quaternion();
+      const t = new Vector3();
+      rel.decompose(undefined, q, t);
+      const c = Vector3.TransformCoordinates(p.center, rel);
+      cont.addChild(new PhysicsShapeBox(Vector3.Zero(), Quaternion.Identity(), p.size, scene), c, q);
+      mass += p.mass;
+    }
+    cont.filterMembershipMask = COL_RAGDOLL;
+    cont.filterCollideMask = COL_STATIC | COL_RAGDOLL;
+    cont.material = { friction: 0.8, restitution: 0.25 };
+    const body = new PhysicsBody(root, PhysicsMotionType.DYNAMIC, false, scene);
+    body.shape = cont;
+    body.setMassProperties({ mass });
+    body.setLinearDamping(0.1);
+    body.setAngularDamping(0.4);
+    this.bodies.push(body);
+    body.setLinearVelocity(opts.velocity ?? Vector3.Zero());
+    const spin = opts.spin ?? 0;
+    if (spin) body.setAngularVelocity(new Vector3((Math.random() - 0.5) * spin, (Math.random() - 0.5) * spin, (Math.random() - 0.5) * spin));
+  }
+
+  applyImpulse(impulse: Vector3, point: Vector3) {
+    if (!this.disposed) this.bodies[0].applyImpulse(impulse, point);
+  }
+
+  get position(): Vector3 {
+    return this.root.position;
+  }
+
+  isResting(): boolean {
+    return this.bodies[0].getLinearVelocity().lengthSquared() < 0.25;
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const b of this.bodies) {
+      b.shape?.dispose();
+      b.dispose();
+    }
+    this.bodies = [];
+  }
+}
+
+/** 死骸として扱える物（ラグドール / 固まった死骸） */
+export type CorpseBody = Ragdoll | RigidCorpse;
+
+/** パーツ i を動かす剛体 */
+export function corpseBodyOf(c: CorpseBody, i: number): PhysicsBody | undefined {
+  return c instanceof RigidCorpse ? c.bodies[0] : c.bodies[i];
 }

@@ -274,9 +274,21 @@ export class Spider extends GroundEnemy {
     this.abdomen.rotationQuaternion = Quaternion.RotationYawPitchRoll(Math.sin(this.t * 1.3) * 0.08, Math.sin(this.t * 2) * 0.05, 0);
   }
 
+  /** 死亡ポーズ: 8本の脚を内側へ丸める */
+  protected deathPose() {
+    const inv = new Quaternion();
+    for (const l of this.legs) {
+      const fq = fromToQuat(Vector3.Right(), new Vector3(l.side * 0.6, 0.45, l.zf * 0.5), l.femur.rotationQuaternion!);
+      Quaternion.InverseToRef(fq, inv);
+      const td = new Vector3(-l.side * 0.6, -0.35, l.zf * 0.1).rotateByQuaternionToRef(inv, new Vector3());
+      fromToQuat(Vector3.Right(), td, l.tibia.rotationQuaternion!);
+    }
+    this.abdomen.rotationQuaternion = Quaternion.RotationYawPitchRoll(0, 0.25, rand(-0.2, 0.2));
+  }
+
   protected onDeath(dir: Vector3, force: number) {
     sfx.squish(this.position);
-    const v = new Vector3(dir.x, 0, dir.z).scale(force * 0.6).add(new Vector3(0, 3 + force * 0.3, 0));
-    this.ragdollize(v.add(this.vel.scale(0.5)), 2 + force * 0.05);
+    const v = new Vector3(dir.x, 0, dir.z).scale(force * 0.2).add(new Vector3(0, 1.5 + force * 0.1, 0));
+    this.rigidize(v.add(this.vel.scale(0.3)), 0.8 + force * 0.04);
   }
 }

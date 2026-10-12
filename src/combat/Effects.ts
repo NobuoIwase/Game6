@@ -396,7 +396,7 @@ export class Effects {
   }
 
   /** 敵への着弾（体液や火花） */
-  hitEnemy(pos: Vector3, dir: Vector3, kind: "ant" | "spider" | "flyer", heavy = false) {
+  hitEnemy(pos: Vector3, dir: Vector3, kind: string, heavy = false) {
     const back = dir.scale(-1);
     const c = heavy ? 18 : 6;
     if (kind === "ant") this.fluidAnt.emit(pos, c, { dir: back.add(Vector3.Up().scale(0.6)), spread: 0.9, radius: 0.2 });
@@ -405,8 +405,8 @@ export class Effects {
   }
 
   /** 撃破時の体液の飛び散り */
-  gore(pos: Vector3, kind: "ant" | "spider" | "flyer") {
-    if (kind === "flyer") {
+  gore(pos: Vector3, kind: string) {
+    if (kind === "flyer" || kind === "carrier") {
       this.explosion(pos, 5, false);
       return;
     }

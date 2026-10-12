@@ -40,7 +40,7 @@ export class Pickups {
   }
 
   drop(pos: Vector3) {
-    const kind = Math.random() < 0.6 ? "armor" : "health";
+    const kind = Math.random() < 0.4 ? "armor" : "health"; // 回復が出やすい
     const mesh = this.tpl[kind].createInstance("item");
     mesh.isPickable = false;
     this.items.push({ mesh, kind, pos: pos.clone(), vy: 6, life: 90 });

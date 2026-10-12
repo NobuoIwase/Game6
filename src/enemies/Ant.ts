@@ -7,7 +7,7 @@
 // ・ビルの壁をよじ登って最短距離で迫る
 // メッシュは InstancedMesh（同種パーツをまとめて1回で描画）で軽量化している。
 // ============================================================================
-import { Color3, InstancedMesh, Mesh, MeshBuilder, Quaternion, Scene, TransformNode, Vector3 } from "@babylonjs/core";
+import { Color3, InstancedMesh, Matrix, Mesh, MeshBuilder, Quaternion, Scene, TransformNode, Vector3 } from "@babylonjs/core";
 import { bakeT, cursorPlate, glowMaterial, merge, shard, shellMaterial } from "./AlienShapes";
 import { ENEMIES } from "../data/enemies";
 import type { GameContext } from "../core/GameContext";
@@ -61,33 +61,71 @@ export function hideTemplate(m: Mesh) {
 const FWD = Math.PI / 2;
 const BACK = -Math.PI / 2;
 
+/**
+ * 体軸（+Z）のまわりに放射状に板を並べた「ロゼット」。
+ * 板の根元は体軸付近、先端は外側へ広がり、tilt だけ前後に傾く（正で後ろへ反る）。
+ * @param from,to 並べる角度の範囲（ラジアン。0 = 右、π/2 = 上）
+ */
+function rosette(scene: Scene, n: number, size: number, thick: number, tilt: number, center: Vector3, from = 0, to = Math.PI * 2, full = true): Mesh[] {
+  const out: Mesh[] = [];
+  for (let k = 0; k < n; k++) {
+    const a = full ? from + ((to - from) * k) / n : from + ((to - from) * k) / Math.max(1, n - 1);
+    const m = cursorPlate(scene, "ros", size, thick);
+    // 先端(+Y)を根元から size*0.35 だけ外へ → 板を縦(YZ面)に → 後ろへ反らす → 体軸まわりに回す
+    const mat = Matrix.Translation(0, size * 0.35, 0)
+      .multiply(Matrix.RotationY(Math.PI / 2))
+      .multiply(Matrix.RotationX(-tilt))
+      .multiply(Matrix.RotationZ(a - Math.PI / 2))
+      .multiply(Matrix.Translation(center.x, center.y, center.z));
+    m.bakeTransformIntoVertices(mat);
+    out.push(m);
+  }
+  return out;
+}
+
 function templates(scene: Scene): AntTemplates {
   const c = cache.get(scene);
   if (c) return c;
-  // 黒曜石のような外殻＋赤く光る眼
+  // 黒曜石のような外殻＋赤みがかった襟飾り＋赤く光る眼
   const shell = shellMaterial(scene, "antShell", new Color3(0.035, 0.032, 0.04), 0.7, 0.22);
+  const accent = shellMaterial(scene, "antAccent", new Color3(0.22, 0.03, 0.03), 0.6, 0.3);
   const glow = glowMaterial(scene, "antGlow", new Color3(3.2, 0.25, 0.12));
   const V = (x: number, y: number, z: number) => new Vector3(x * S, y * S, z * S);
   const plate = (size: number, thick: number, pos: Vector3, rot: Vector3) =>
     bakeT(cursorPlate(scene, "pl", size * S, thick * S), pos, rot);
 
-  // 胸部: 水平の板と垂直の板の十字
+  // 胸部: 体軸のまわりに板を放射状に（立体的な胴）
   const thorax = merge("antThorax", [
     plate(2.0, 0.3, V(0, 0, 0.1), new Vector3(FWD, 0, 0)),
-    plate(1.5, 0.25, V(0, 0, 0), new Vector3(FWD, 0, Math.PI / 2)),
+    plate(1.6, 0.25, V(0, 0, 0), new Vector3(FWD, 0, Math.PI / 2)),
+    ...rosette(scene, 6, 1.3 * S, 0.18 * S, 0.45, V(0, 0, -0.1)),
   ]);
-  // 頭部: 前を向いた板と、とさか
-  const head = merge("antHead", [
-    plate(1.5, 0.3, V(0, 0.05, 0.55), new Vector3(FWD, 0, 0)),
-    plate(1.0, 0.2, V(0, 0.2, 0.4), new Vector3(FWD, 0, Math.PI / 2)),
+  // 頭部: 前を向いた本体、トリケラトプスのような角3本と、後ろへ広がる襟飾り
+  const headCore = [
+    plate(1.6, 0.35, V(0, 0, 0.55), new Vector3(FWD, 0, 0)),
+    plate(1.2, 0.25, V(0, 0.1, 0.45), new Vector3(FWD, 0, Math.PI / 2)),
+    // 角（前上方へ）
+    plate(1.1, 0.14, V(0.35, 0.45, 0.9), new Vector3(FWD - 0.5, 0.25, 0)),
+    plate(1.1, 0.14, V(-0.35, 0.45, 0.9), new Vector3(FWD - 0.5, -0.25, 0)),
+    plate(0.8, 0.14, V(0, 0.15, 1.25), new Vector3(FWD - 0.2, 0, Math.PI / 2)),
+  ];
+  const frill = merge("antFrill", rosette(scene, 9, 1.9 * S, 0.12 * S, 1.05, V(0, 0.25, 0.1), -0.7, Math.PI + 0.7, false));
+  frill.material = accent;
+  const headShell = merge("antHeadShell", headCore);
+  headShell.material = shell;
+  const head = Mesh.MergeMeshes([headShell, frill], true, true, undefined, false, true)!;
+  head.name = "antHead";
+  // 腹部（尾）: 後ろ向きの芯と、大きく広がる放射状の板
+  const abShell = merge("antAbShell", [
+    plate(3.2, 0.4, V(0, 0.2, -1.6), new Vector3(BACK, 0, 0)),
+    plate(2.6, 0.35, V(0, 0.3, -1.5), new Vector3(BACK, 0, Math.PI / 2)),
+    ...rosette(scene, 8, 2.0 * S, 0.2 * S, 0.9, V(0, 0.25, -1.2)),
   ]);
-  // 腹部: 後ろ向きの大きな板を扇状に重ねる
-  const abdomen = merge("antAbdomen", [
-    plate(3.0, 0.35, V(0, 0.2, -1.5), new Vector3(BACK, 0, 0)),
-    plate(2.4, 0.3, V(0, 0.3, -1.4), new Vector3(BACK, 0, Math.PI / 2)),
-    plate(2.2, 0.25, V(0, 0.35, -1.3), new Vector3(BACK, 0, 0.6)),
-    plate(2.2, 0.25, V(0, 0.35, -1.3), new Vector3(BACK, 0, -0.6)),
-  ]);
+  abShell.material = shell;
+  const abFins = merge("antAbFins", rosette(scene, 6, 1.5 * S, 0.12 * S, 1.25, V(0, 0.25, -2.4), Math.PI / 6, Math.PI * 2 + Math.PI / 6));
+  abFins.material = accent;
+  const abdomen = Mesh.MergeMeshes([abShell, abFins], true, true, undefined, false, true)!;
+  abdomen.name = "antAbdomen";
   const femur = shard(scene, "antFemur", FEMUR_L, 0.4 * S, 0.25 * S);
   const tibia = shard(scene, "antTibia", TIBIA_L, 0.3 * S, 0.04 * S);
   const mandible = plate(0.9, 0.15, V(0, 0, 0.4), new Vector3(FWD, 0, 0));
@@ -99,7 +137,7 @@ function templates(scene: Scene): AntTemplates {
   ]);
   const t: AntTemplates = { thorax, head, abdomen, femur, tibia, mandible, antenna, eyes };
   for (const m of Object.values(t)) {
-    m.material = m === eyes ? glow : shell;
+    if (m !== head && m !== abdomen) m.material = m === eyes ? glow : shell;
     hideTemplate(m);
   }
   cache.set(scene, t);
@@ -377,9 +415,23 @@ export class Ant extends GroundEnemy {
     }
   }
 
+  /** 死亡ポーズ: 脚を縮めて腹側へ折りたたみ、頭と尾を反らせる（虫の死骸のように） */
+  protected deathPose() {
+    const inv = new Quaternion();
+    for (const l of this.legs) {
+      const fq = fromToQuat(Vector3.Right(), new Vector3(l.side * 0.8, -0.05, l.zf * 0.35), l.femur.rotationQuaternion!);
+      Quaternion.InverseToRef(fq, inv);
+      const td = new Vector3(-l.side * 0.75, 0.35, l.zf * 0.15).rotateByQuaternionToRef(inv, new Vector3());
+      fromToQuat(Vector3.Right(), td, l.tibia.rotationQuaternion!);
+    }
+    this.head.rotationQuaternion = Quaternion.RotationYawPitchRoll(rand(-0.3, 0.3), -0.45, rand(-0.2, 0.2));
+    this.abdomen.rotationQuaternion = Quaternion.RotationYawPitchRoll(rand(-0.2, 0.2), -0.35, 0);
+  }
+
   protected onDeath(dir: Vector3, force: number) {
     sfx.squish(this.position);
-    const v = new Vector3(dir.x, 0, dir.z).scale(force * 0.5).add(new Vector3(0, 2 + force * 0.25, 0));
-    this.ragdollize(v, 1.5 + force * 0.05);
+    // 瞬間的に死亡ポーズで固まり、軽く跳ねる（爆風なら大きく飛ぶ）
+    const v = new Vector3(dir.x, 0, dir.z).scale(force * 0.2).add(new Vector3(0, 1.5 + force * 0.1, 0));
+    this.rigidize(v, 0.8 + force * 0.04);
   }
 }

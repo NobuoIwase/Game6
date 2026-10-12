@@ -12,6 +12,7 @@ import { Enemy, GroundEnemy } from "./Enemy";
 import { Ant } from "./Ant";
 import { Spider } from "./Spider";
 import { Flyer, FlyerSquad } from "./Flyer";
+import { Carrier } from "./Carrier";
 import { raySphere, rand } from "../core/MathUtil";
 
 export interface EnemyRayHit {
@@ -25,6 +26,20 @@ export class EnemyManager {
   list: Enemy[] = [];
   squads: FlyerSquad[] = [];
   private groupSeq = 0;
+  /** 輸送船の出現・ハッチ開放（無線演出用） */
+  onCarrier?: (c: Carrier) => void;
+  carrierOpened?: (c: Carrier) => void;
+
+  /** 輸送船から蟻型を投下する（空中に出現し、落下して着地する） */
+  dropAnt(p: Vector3) {
+    const a = new Ant(this.ctx, p.clone(), ++this.groupSeq);
+    a.position.copyFrom(p);
+    a.airborne = true;
+    a.vel.set(rand(-2, 2), -3, rand(-2, 2));
+    a.activate(0.4);
+    this.list.push(a);
+  }
+
   /** 何かが起動したとき（無線演出用） */
   onFirstAlert?: () => void;
   private anyAlerted = false;
@@ -41,6 +56,16 @@ export class EnemyManager {
     const group = ++this.groupSeq;
     const count = Math.max(1, Math.round(g.count * scale));
     const center = new Vector3(g.at[0], 0, g.at[1]);
+    if (g.type === "carrier") {
+      // マップの外側から飛来して、指定地点の上空で止まる
+      const out = center.lengthSquared() > 1 ? center.normalizeToNew() : new Vector3(0, 0, -1);
+      const from = out.scale(320).addInPlace(new Vector3(0, 90, 0));
+      const c = new Carrier(this.ctx, from, group, center.add(new Vector3(0, 62, 0)));
+      c.activate(0);
+      this.list.push(c);
+      this.onCarrier?.(c);
+      return;
+    }
     if (g.type === "flyer") {
       const home = center.add(new Vector3(0, 55, 0));
       const squad = new FlyerSquad(home, g.formation ?? "v");

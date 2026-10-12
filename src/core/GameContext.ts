@@ -7,7 +7,7 @@ import type { EnemyManager } from "../enemies/EnemyManager";
 import type { Player } from "../entities/Player";
 import type { DifficultyDef } from "../data/missions";
 import type { QualitySettings } from "./Quality";
-import type { Ragdoll } from "./Physics";
+import type { CorpseBody } from "./Physics";
 
 export interface ExplosionOpts {
   pos: Vector3;
@@ -31,8 +31,10 @@ export interface GameContext {
   time: number;
   explode(opts: ExplosionOpts): void;
   /** ラグドール（死体）を登録。寿命管理と後片付けはゲーム側が行う */
-  addCorpse(r: Ragdoll, nodes: TransformNode[]): void;
+  addCorpse(r: CorpseBody, nodes: TransformNode[]): void;
   dropItem(pos: Vector3): void;
   /** 線分と死骸の交差距離（死骸が敵弾・味方弾の壁になる） */
   corpseSegment(a: Vector3, b: Vector3): number | null;
+  /** t 秒後に fn を実行（ゲーム内時間） */
+  later(t: number, fn: () => void): void;
 }

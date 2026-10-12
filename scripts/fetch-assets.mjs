@@ -14,6 +14,10 @@ const textures = [
   ["concrete_pavement", "pavement"],
   ["concrete_panels", "facade"],
   ["brick_wall_001", "brick"],
+  ["aerial_grass_rock", "grass"],
+  ["ceramic_roof_01", "rooftile"],
+  ["beige_wall_001", "plaster"],
+  ["corrugated_iron", "corrugated"],
 ];
 const hdri = "kloofendal_48d_partly_cloudy_puresky";
 
