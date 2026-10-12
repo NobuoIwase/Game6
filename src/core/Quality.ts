@@ -11,6 +11,8 @@ export interface QualitySettings {
   bloom: boolean;
   /** 同時に物理演算するラグドールの上限 */
   maxRagdolls: number;
+  /** ポストエフェクト（ブルーム・SSAO・フィルムグレイン等）を使うか。使わない場合は MSAA で軽く描く */
+  postProcess: boolean;
   /** 敵出現数の倍率 */
   enemyScale: number;
   /** パーティクル量の倍率 */
@@ -30,18 +32,20 @@ export function isMobile(): boolean {
 
 export function resolveQuality(choice: string): QualitySettings {
   const level: QualityLevel =
-    choice === "low" || choice === "medium" || choice === "high" ? choice : isMobile() ? "low" : "high";
+    choice === "low" || choice === "medium" || choice === "high" ? choice : isMobile() ? "low" : "medium";
   const dpr = window.devicePixelRatio || 1;
   switch (level) {
     case "low":
       return {
         level,
-        hardwareScaling: Math.max(1, dpr / 1.25),
+        // スマホは高 DPI なので、ある程度の解像度を確保しつつ負荷を抑える
+        hardwareScaling: Math.max(1, dpr / 1.75),
         shadows: "simple",
         shadowMapSize: 1024,
         ssao: false,
         bloom: false,
-        maxRagdolls: 10,
+        postProcess: false,
+        maxRagdolls: 12,
         enemyScale: 0.6,
         particleScale: 0.5,
         viewDistance: 450,
@@ -49,12 +53,13 @@ export function resolveQuality(choice: string): QualitySettings {
     case "medium":
       return {
         level,
-        hardwareScaling: Math.max(1, dpr / 1.5),
-        shadows: "cascaded",
-        shadowMapSize: 1024,
+        hardwareScaling: Math.max(1, dpr / 2),
+        shadows: "simple",
+        shadowMapSize: 2048,
         ssao: false,
-        bloom: true,
-        maxRagdolls: 24,
+        bloom: false,
+        postProcess: false,
+        maxRagdolls: 30,
         enemyScale: 0.85,
         particleScale: 0.8,
         viewDistance: 700,
@@ -67,6 +72,7 @@ export function resolveQuality(choice: string): QualitySettings {
         shadowMapSize: 2048,
         ssao: true,
         bloom: true,
+        postProcess: true,
         maxRagdolls: 45,
         enemyScale: 1,
         particleScale: 1,

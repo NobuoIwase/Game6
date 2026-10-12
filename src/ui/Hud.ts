@@ -27,6 +27,62 @@ export class Hud {
   private hitT = 0;
   private statusT = 0;
   radarRange = 160;
+  /** 照準の先の敵が有効射程内なら true（照準が赤くなる） */
+  inRange = false;
+  private dmgPool: { el: HTMLDivElement; pos: Vector3; t: number; life: number; dx: number }[] = [];
+  private dmgNext = 0;
+
+  /** 敵に与えたダメージを数字で表示 */
+  damage(pos: Vector3, amount: number, kind: "normal" | "big" | "weak" = "normal") {
+    const layer = $("dmgLayer");
+    let d = this.dmgPool.find((x) => x.t >= x.life);
+    if (!d) {
+      if (this.dmgPool.length < 40) {
+        const el = document.createElement("div");
+        layer.appendChild(el);
+        d = { el, pos: new Vector3(), t: 0, life: 0.8, dx: 0 };
+        this.dmgPool.push(d);
+      } else {
+        d = this.dmgPool[this.dmgNext];
+        this.dmgNext = (this.dmgNext + 1) % this.dmgPool.length;
+      }
+    }
+    d.pos.copyFrom(pos);
+    d.t = 0;
+    d.life = kind === "big" ? 1.1 : 0.75;
+    d.dx = (Math.random() - 0.5) * 30;
+    d.el.className = "dmg " + (kind === "normal" ? "" : kind);
+    d.el.textContent = String(Math.max(1, Math.round(amount)));
+    d.el.style.display = "block";
+  }
+
+  private updateDamage(dt: number, scene: Scene, camera: Camera) {
+    if (!this.dmgPool.length) return;
+    const engine = scene.getEngine();
+    const vw = engine.getRenderWidth(),
+      vh = engine.getRenderHeight();
+    const transform = scene.getTransformMatrix();
+    const viewport = camera.viewport.toGlobal(vw, vh);
+    const cw = window.innerWidth / vw,
+      chh = window.innerHeight / vh;
+    for (const d of this.dmgPool) {
+      if (d.t >= d.life) {
+        if (d.el.style.display !== "none") d.el.style.display = "none";
+        continue;
+      }
+      d.t += dt;
+      const p = Vector3.Project(d.pos, Matrix.IdentityReadOnly, transform, viewport);
+      if (p.z < 0 || p.z > 1) {
+        d.el.style.display = "none";
+        continue;
+      }
+      d.el.style.display = "block";
+      const k = d.t / d.life;
+      d.el.style.left = `${p.x * cw + d.dx * k}px`;
+      d.el.style.top = `${p.y * chh - 40 * k}px`;
+      d.el.style.opacity = String(1 - k * k);
+    }
+  }
 
   show(on: boolean) {
     $("hud").classList.toggle("hidden", !on);
@@ -100,11 +156,13 @@ export class Hud {
     const ch = $("crosshair");
     ch.classList.toggle("zoom", zoom && w.def.zoom > 1.2);
     ch.classList.toggle("ml", w.def.kind === "homing");
+    ch.classList.toggle("inrange", this.inRange);
     this.hitT -= dt;
     $("hitmarker").classList.toggle("on", this.hitT > 0);
 
-    // ロックオン表示
+    // ロックオン表示・ダメージ数字
     this.updateLocks(player, scene, camera);
+    this.updateDamage(dt, scene, camera);
 
     // 被弾・拘束の演出
     ($("damageVignette") as HTMLElement).style.opacity = String(Math.min(1, player.hurtFlash + (ratio < 0.25 ? 0.35 : 0)));

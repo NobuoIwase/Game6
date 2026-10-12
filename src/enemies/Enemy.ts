@@ -100,7 +100,8 @@ export abstract class Enemy {
     if (!this.alive) return;
     if (!this.active) this.ctx.enemies.alert(this);
     this.hp -= amount;
-    this.stagger = Math.min(0.35, this.stagger + amount / this.maxHp);
+    // 怯み時間: 1発ごとに最低 0.18 秒、威力が大きいほど長い
+    this.stagger = Math.min(0.6, Math.max(this.stagger, 0.18) + (amount / this.maxHp) * 0.8);
     if (this.hp <= 0) {
       this.alive = false;
       this.ctx.effects.gore(this.center(), this.kind);
@@ -196,7 +197,7 @@ export abstract class GroundEnemy extends Enemy {
   protected onKnock(dir: Vector3, knock: number, _point: Vector3) {
     if (knock < 6) return;
     // 爆風で吹き飛ぶ
-    const k = knock / (this.def.mass / 100);
+    const k = knock / (this.def.mass / 300);
     this.vel.set(dir.x * k, Math.max(4, k * 0.6), dir.z * k);
     this.airborne = true;
     this.spinRate = (Math.random() - 0.5) * 8;
@@ -226,6 +227,10 @@ export abstract class GroundEnemy extends Enemy {
     const targetPitch = this.climbing > 0 ? -Math.PI / 2.3 : this.climbing < 0 ? Math.PI / 2.6 : 0;
     this.pitch += (targetPitch - this.pitch) * damp(10, dt);
     if (!this.airborne) this.roll += (0 - this.roll) * damp(6, dt);
-    Quaternion.RotationYawPitchRollToRef(this.yaw, this.pitch, this.roll, this.root.rotationQuaternion!);
+    // 怯みモーション: のけぞって小刻みに震える
+    const fl = Math.min(1, this.stagger * 4);
+    const flinchP = fl > 0 ? -0.22 * fl + Math.sin(this.t * 47) * 0.05 * fl : 0;
+    const flinchR = fl > 0 ? Math.sin(this.t * 39) * 0.06 * fl : 0;
+    Quaternion.RotationYawPitchRollToRef(this.yaw, this.pitch + flinchP, this.roll + flinchR, this.root.rotationQuaternion!);
   }
 }

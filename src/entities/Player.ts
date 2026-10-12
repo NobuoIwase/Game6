@@ -41,6 +41,7 @@ export class Player {
   private switchT = 0;
   /** 被弾時の演出用（0..1） */
   hurtFlash = 0;
+  dashing = false;
   yaw = 0;
   pitch = 0;
   private _chest = new Vector3();
@@ -120,7 +121,9 @@ export class Player {
     const right = new Vector3(fwd.z, 0, -fwd.x);
     const wish = fwd.scale(input.moveY).addInPlace(right.scale(input.moveX));
     const zoomSlow = input.zoom && this.weapon.def.zoom > 1.2 ? 0.55 : 1;
-    const speed = 6.2 * zoomSlow;
+    // ダッシュ: 移動中に Shift（スマホはボタン）。射撃・ズームすると解除される
+    this.dashing = input.dash && !input.fire && !input.zoom && this.grounded && input.moveY > -0.3 && wish.lengthSquared() > 0.04;
+    const speed = this.dashing ? 12 : 6.2 * zoomSlow;
 
     if (this.state === "roll") {
       this.rollT += dt;
@@ -159,7 +162,7 @@ export class Player {
     this.ctx.city.collideCircle(p, this.radius, this.height);
     this.pushFromEnemies(p);
     this.ctx.city.clampToMap(p, 1);
-    const g = this.ctx.city.heightAt(p.x, p.z);
+    const g = this.ctx.city.heightAt(p.x, p.z, p.y);
     if (p.y <= g + 0.02 && this.velY <= 0) {
       if (!this.grounded && this.velY < -12) this.ctx.effects.puff(p, 3, 0.5);
       p.y = g;
@@ -168,7 +171,7 @@ export class Player {
     } else if (p.y > g + 0.3) this.grounded = false;
 
     // ---- 射撃 ----
-    const canFire = this.state === "normal" && this.switchT <= 0;
+    const canFire = this.state === "normal" && this.switchT <= 0 && !this.dashing;
     this.weapons.forEach((w, i) => {
       const fired = w.update(dt, combat, i === this.current, input.fire, canFire);
       if (fired) this.recoil = Math.min(1, this.recoil + 0.35 + w.def.recoil * 4);
@@ -177,7 +180,7 @@ export class Player {
     // ---- アニメーション ----
     const localF = Vector3.Dot(this.velH, fwd);
     const localR = Vector3.Dot(this.velH, right);
-    this.soldier.animate(dt, localF, localR, aimPitch, this.grounded, this.recoil, this.weapon.reloading || this.switchT > 0);
+    this.soldier.animate(dt, localF, localR, aimPitch, this.grounded, this.recoil, this.weapon.reloading || this.switchT > 0 || this.dashing);
   }
 
   private switchWeapon(i: number) {
@@ -270,7 +273,7 @@ export class Player {
     this.ctx.city.clampToMap(p, 1);
     // 建物にめり込んでいたら押し出す
     for (let i = 0; i < 4; i++) this.ctx.city.collideCircle(p, this.radius, this.height);
-    p.y = this.ctx.city.heightAt(p.x, p.z);
+    p.y = this.ctx.city.heightAt(p.x, p.z, pelvis.y);
     this.velH.setAll(0);
     this.velY = 0;
     this.state = "normal";

@@ -5,7 +5,8 @@
 // ・扇状に糸を放つ。糸が当たるとダメージ＋「拘束値」が蓄積し、
 //   一定以上でプレイヤーは糸に絡め取られて倒れる（ラグドール化）
 // ============================================================================
-import { Color3, InstancedMesh, Mesh, MeshBuilder, PBRMaterial, Quaternion, Scene, TransformNode, Vector3 } from "@babylonjs/core";
+import { Color3, InstancedMesh, Mesh, Quaternion, Scene, TransformNode, Vector3 } from "@babylonjs/core";
+import { bakeT, cursorPlate, glowMaterial, merge, shard, shellMaterial } from "./AlienShapes";
 import { ENEMIES } from "../data/enemies";
 import type { GameContext } from "../core/GameContext";
 import { GroundEnemy } from "./Enemy";
@@ -13,7 +14,7 @@ import { clamp, fromToQuat, rand, yawOf } from "../core/MathUtil";
 import { GRAVITY } from "../core/Physics";
 import { spreadDir } from "../combat/Weapon";
 import { sfx } from "../core/Audio";
-import { hideTemplate, limb } from "./Ant";
+import { hideTemplate } from "./Ant";
 
 interface SpiderTemplates {
   body: Mesh;
@@ -23,78 +24,48 @@ interface SpiderTemplates {
   eyes: Mesh;
 }
 
-const FEMUR_L = 2.3;
-const TIBIA_L = 3.0;
+/** 体の大きさの倍率（脚を広げて 約14m） */
+const S = 1.6;
+const FEMUR_L = 2.3 * S;
+const TIBIA_L = 3.0 * S;
 const cache = new WeakMap<Scene, SpiderTemplates>();
-
-function bake(m: Mesh, scale: Vector3, pos: Vector3, rot?: Vector3) {
-  m.scaling.copyFrom(scale);
-  m.position.copyFrom(pos);
-  if (rot) m.rotation.copyFrom(rot);
-  m.bakeCurrentTransformIntoVertices();
-  return m;
-}
+const FWD = Math.PI / 2;
+const BACK = -Math.PI / 2;
 
 function templates(scene: Scene): SpiderTemplates {
   const c = cache.get(scene);
   if (c) return c;
-  const hair = new PBRMaterial("spiderHair", scene);
-  hair.albedoColor = new Color3(0.035, 0.028, 0.022);
-  hair.metallic = 0;
-  hair.roughness = 0.75;
-  hair.sheen.isEnabled = true;
-  hair.sheen.intensity = 0.25;
-  hair.sheen.color = new Color3(0.45, 0.4, 0.3);
-  const stripe = new PBRMaterial("spiderStripe", scene);
-  stripe.albedoColor = new Color3(0.42, 0.26, 0.06);
-  stripe.roughness = 0.6;
-  const eye = new PBRMaterial("spiderEye", scene);
-  eye.albedoColor = new Color3(0.1, 0, 0);
-  eye.emissiveColor = new Color3(1.6, 0.05, 0.02);
-  eye.roughness = 0.1;
-
-  const s = (name: string) => MeshBuilder.CreateSphere(name, { diameter: 1, segments: 14 }, scene);
-  const body = bake(s("spBody"), new Vector3(1.5, 0.9, 1.7), new Vector3(0, 0, 0.1));
-  body.material = hair;
-  const ab = bake(s("spAbd"), new Vector3(2.2, 1.9, 2.6), new Vector3(0, 0.35, -1.5), new Vector3(-0.25, 0, 0));
-  ab.material = hair;
-  // 腹部の模様（背中の斑紋）
-  const spots: Mesh[] = [];
-  for (const [z, w] of [
-    [-0.9, 0.7],
-    [-1.5, 0.9],
-    [-2.1, 0.6],
-  ]) {
-    const sp = MeshBuilder.CreateSphere("spSpot", { diameter: 1, segments: 8 }, scene);
-    bake(sp, new Vector3(w, 0.12, 0.35), new Vector3(0, 1.22 + (z === -1.5 ? 0.08 : -0.05), z));
-    spots.push(sp);
-  }
-  const band = Mesh.MergeMeshes(spots, true)!;
-  band.material = stripe;
-  const abdomen = Mesh.MergeMeshes([ab, band], true, true, undefined, false, true)!;
-  abdomen.name = "spAbdomen";
-  const femur = limb(scene, "spFemur", FEMUR_L, 0.26, 0.18);
-  femur.material = hair;
-  const tibia = limb(scene, "spTibia", TIBIA_L, 0.18, 0.04);
-  tibia.material = hair;
-  const eyeParts: Mesh[] = [];
-  for (const [x, y, d] of [
-    [0.18, 0.25, 0.22],
-    [-0.18, 0.25, 0.22],
-    [0.38, 0.18, 0.14],
-    [-0.38, 0.18, 0.14],
-    [0.1, 0.38, 0.1],
-    [-0.1, 0.38, 0.1],
-  ]) {
-    const e = MeshBuilder.CreateSphere("spEye", { diameter: d, segments: 6 }, scene);
-    e.position.set(x, y, 0.92);
-    eyeParts.push(e);
-  }
-  const eyes = Mesh.MergeMeshes(eyeParts, true)!;
-  eyes.material = eye;
-  eyes.name = "spEyes";
+  // 骨のように白っぽい外殻＋紫に光る眼（蟻型とは逆の配色）
+  const shell = shellMaterial(scene, "spiderShell", new Color3(0.72, 0.68, 0.6), 0.15, 0.5);
+  const glow = glowMaterial(scene, "spiderGlow", new Color3(1.6, 0.3, 3.2));
+  const V = (x: number, y: number, z: number) => new Vector3(x * S, y * S, z * S);
+  const plate = (size: number, thick: number, pos: Vector3, rot: Vector3) =>
+    bakeT(cursorPlate(scene, "pl", size * S, thick * S), pos, rot);
+  // 頭胸部: 3枚の板を放射状に（三角形の星）
+  const body = merge("spBody", [
+    plate(1.9, 0.3, V(0, 0, 0.2), new Vector3(FWD, 0, 0)),
+    plate(1.5, 0.25, V(0.3, 0, -0.1), new Vector3(FWD, 2.1, 0)),
+    plate(1.5, 0.25, V(-0.3, 0, -0.1), new Vector3(FWD, -2.1, 0)),
+  ]);
+  // 腹部: 大きな後ろ向きの板を上下に重ね、ふくらみを出す
+  const abdomen = merge("spAbdomen", [
+    plate(2.8, 0.4, V(0, 0.35, -1.5), new Vector3(BACK - 0.25, 0, 0)),
+    plate(2.4, 0.35, V(0, 0.7, -1.4), new Vector3(BACK - 0.45, 0, 0)),
+    plate(2.2, 0.3, V(0, 0.5, -1.3), new Vector3(BACK - 0.3, 0, Math.PI / 2)),
+  ]);
+  const femur = shard(scene, "spFemur", FEMUR_L, 0.34 * S, 0.2 * S);
+  const tibia = shard(scene, "spTibia", TIBIA_L, 0.22 * S, 0.03 * S);
+  const eyes = merge("spEyes", [
+    plate(0.35, 0.1, V(0.22, 0.25, 0.95), new Vector3(FWD, 0, 0.3)),
+    plate(0.35, 0.1, V(-0.22, 0.25, 0.95), new Vector3(FWD, 0, -0.3)),
+    plate(0.25, 0.1, V(0.45, 0.18, 0.75), new Vector3(FWD, 0.6, 0)),
+    plate(0.25, 0.1, V(-0.45, 0.18, 0.75), new Vector3(FWD, -0.6, 0)),
+  ]);
   const t: SpiderTemplates = { body, abdomen, femur, tibia, eyes };
-  for (const m of Object.values(t)) hideTemplate(m);
+  for (const m of Object.values(t)) {
+    m.material = m === eyes ? glow : shell;
+    hideTemplate(m);
+  }
   cache.set(scene, t);
   return t;
 }
@@ -134,30 +105,31 @@ export class Spider extends GroundEnemy {
       i.isPickable = false;
       return i;
     };
-    this.body = inst(T.body, this.root, new Vector3(0, 1.3, 0));
+    this.body = inst(T.body, this.root, new Vector3(0, 1.3 * S, 0));
+    const P = (x: number, y: number, z: number) => new Vector3(x * S, y * S, z * S);
     inst(T.eyes, this.body, new Vector3(0, 0, 0));
-    this.abdomen = inst(T.abdomen, this.body, new Vector3(0, 0.1, -0.7));
+    this.abdomen = inst(T.abdomen, this.body, P(0, 0.1, -0.7));
     const zs = [0.6, 0.2, -0.2, -0.6];
     const zf = [0.9, 0.3, -0.25, -0.8];
     for (const sx of [-1, 1])
       for (let i = 0; i < 4; i++) {
-        const femur = inst(T.femur, this.body, new Vector3(sx * 0.55, 0.1, zs[i]));
+        const femur = inst(T.femur, this.body, P(sx * 0.55, 0.1, zs[i]));
         const tibia = inst(T.tibia, femur, new Vector3(FEMUR_L, 0, 0));
         const phase = (i + (sx > 0 ? 1 : 0)) % 2 === 0 ? 0 : Math.PI;
         this.legs.push({ femur, tibia, side: sx, zf: zf[i], phase });
       }
     this.position.y = ctx.city.heightAt(pos.x, pos.z);
     this.hitSpheres = [
-      { local: new Vector3(0, 1.3, 0.2), r: 1.0, world: new Vector3(), mult: 1.3 },
-      { local: new Vector3(0, 1.7, -1.4), r: 1.35, world: new Vector3(), mult: 1 },
+      { local: P(0, 1.3, 0.2), r: 1.0 * S, world: new Vector3(), mult: 1.3 },
+      { local: P(0, 1.75, -1.4), r: 1.35 * S, world: new Vector3(), mult: 1 },
     ];
     const V = (x: number, y: number, z: number) => new Vector3(x, y, z);
     this.rig = [
-      { node: this.body, parent: -1, size: V(1.5, 0.9, 1.7), center: V(0, 0, 0.1), mass: 60 },
-      { node: this.abdomen, parent: 0, size: V(2.1, 1.8, 2.5), center: V(0, 0.35, -1.5), mass: 70, swing: 0.5 },
+      { node: this.body, parent: -1, size: P(1.6, 0.6, 1.7), center: P(0, 0, 0.1), mass: 180 },
+      { node: this.abdomen, parent: 0, size: P(2.0, 1.4, 2.5), center: P(0, 0.45, -1.5), mass: 220, swing: 0.5 },
       ...this.legs.flatMap((l, i) => [
-        { node: l.femur, parent: 0, size: V(FEMUR_L, 0.24, 0.24), center: V(FEMUR_L / 2, 0, 0), mass: 4, swing: 1.0 },
-        { node: l.tibia, parent: 2 + i * 2, size: V(TIBIA_L, 0.16, 0.16), center: V(TIBIA_L / 2, 0, 0), mass: 3, swing: 1.1 },
+        { node: l.femur, parent: 0, size: V(FEMUR_L, 0.3 * S, 0.3 * S), center: V(FEMUR_L / 2, 0, 0), mass: 14, swing: 1.0 },
+        { node: l.tibia, parent: 2 + i * 2, size: V(TIBIA_L, 0.2 * S, 0.2 * S), center: V(TIBIA_L / 2, 0, 0), mass: 9, swing: 1.1 },
       ]),
     ];
     this.applyOrientation(0);
@@ -212,6 +184,15 @@ export class Spider extends GroundEnemy {
     this.jumpCd -= dt;
     this.shootCd -= dt;
 
+    // 被弾中は怯んで攻撃・跳躍が中断される
+    if (this.stagger > 0) {
+      this.windup = -1;
+      this.shootCd = Math.max(this.shootCd, 0.35);
+      this.jumpCd = Math.max(this.jumpCd, 0.3);
+      this.moveSpeed = 0;
+      this.turnTo(yawOf(to), 2, dt);
+      return;
+    }
     // 糸を撃つ前の溜め
     if (this.windup >= 0) {
       this.windup -= dt;
@@ -221,7 +202,7 @@ export class Spider extends GroundEnemy {
       return;
     }
     if (dist < this.def.attackRange && this.shootCd <= 0 && player.alive) {
-      const eye = this.center().add(new Vector3(0, 0.5, 0));
+      const eye = this.center().add(new Vector3(0, 0.5 * S, 0));
       if (this.canSee(eye)) {
         this.windup = 0.35;
         return;
@@ -263,7 +244,7 @@ export class Spider extends GroundEnemy {
 
   private shootWeb() {
     // 扇状に糸を放つ
-    const eye = this.center().add(new Vector3(0, 0.3, 0)).add(new Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)).scale(1.2));
+    const eye = this.center().add(new Vector3(0, 0.3, 0)).add(new Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)).scale(1.2 * S));
     const target = this.ctx.player.chest;
     const dir = target.subtract(eye).normalize();
     const n = 8;

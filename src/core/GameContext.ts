@@ -33,4 +33,6 @@ export interface GameContext {
   /** ラグドール（死体）を登録。寿命管理と後片付けはゲーム側が行う */
   addCorpse(r: Ragdoll, nodes: TransformNode[]): void;
   dropItem(pos: Vector3): void;
+  /** 線分と死骸の交差距離（死骸が敵弾・味方弾の壁になる） */
+  corpseSegment(a: Vector3, b: Vector3): number | null;
 }

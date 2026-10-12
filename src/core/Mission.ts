@@ -11,6 +11,8 @@ export class Mission {
   result: "playing" | "clear" | "failed" = "playing";
   elapsed = 0;
   kills = 0;
+  /** ウェーブの特殊演出の発生通知 */
+  onEvent?: (name: string) => void;
 
   constructor(
     readonly def: MissionDef,
@@ -38,6 +40,7 @@ export class Mission {
       if (fire) {
         for (const g of next.groups) this.enemies.spawnGroup(g, this.enemyScale);
         this.hud.radio(next.radio);
+        for (const ev of next.events ?? []) this.onEvent?.(ev);
         this.waveIndex++;
         this.sinceWave = 0;
       }

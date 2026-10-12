@@ -232,6 +232,8 @@ export interface CityMaterials {
   sidewalk: PBRMaterial;
   plaza: PBRMaterial;
   rubble: PBRMaterial;
+  balcony: PBRMaterial;
+  garageWall: PBRMaterial;
   marking: PBRMaterial;
   metal: PBRMaterial;
   darkMetal: PBRMaterial;
@@ -266,6 +268,8 @@ export async function createCityMaterials(scene: Scene): Promise<CityMaterials> 
   const sidewalk = surfaceMaterial("sidewalk", "pavement", scene, 1);
   const plaza = surfaceMaterial("plaza", "pavement", scene, 1, new Color3(0.95, 0.9, 0.85));
   const rubble = surfaceMaterial("rubble", "facade", scene, 1, new Color3(0.55, 0.53, 0.5));
+  const balcony = surfaceMaterial("balcony", "pavement", scene, 1, new Color3(0.85, 0.83, 0.8));
+  const garageWall = surfaceMaterial("garageWall", "facade", scene, 1, new Color3(0.8, 0.8, 0.78));
 
   const marking = new PBRMaterial("marking", scene);
   marking.albedoColor = new Color3(0.85, 0.85, 0.82);
@@ -316,5 +320,5 @@ export async function createCityMaterials(scene: Scene): Promise<CityMaterials> 
   lampGlow.roughness = 0.3;
   lampGlow.metallic = 0;
 
-  return { facades, roof, road, sidewalk, plaza, rubble, marking, metal, darkMetal, carPaints, glassDark, tire, lampGlow };
+  return { facades, roof, road, sidewalk, plaza, rubble, balcony, garageWall, marking, metal, darkMetal, carPaints, glassDark, tire, lampGlow };
 }

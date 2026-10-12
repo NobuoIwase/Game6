@@ -17,6 +17,9 @@ export class Input {
   private mouseFire = false;
   private touchFire = false;
   private touchZoom = false;
+  private touchDash = false;
+  /** ダッシュ（PC: Shift 押しっぱなし / スマホ: ボタンで切替、止まると解除） */
+  dash = false;
   private stick = { x: 0, y: 0 };
   readonly touchMode: boolean;
   mouseSensitivity = 0.0022;
@@ -65,6 +68,8 @@ export class Input {
     this.moveY = y;
     this.fire = this.enabled && (this.mouseFire || this.touchFire);
     this.zoom = this.enabled && (this.zoomHeld || this.touchZoom);
+    if (this.touchDash && Math.hypot(this.stick.x, this.stick.y) < 0.15) this.setTouchDash(false);
+    this.dash = this.enabled && (this.keys.has("ShiftLeft") || this.keys.has("ShiftRight") || this.touchDash);
   }
 
   private zoomHeld = false;
@@ -107,8 +112,6 @@ export class Input {
           this.press("jump");
           e.preventDefault();
           break;
-        case "ShiftLeft":
-        case "ShiftRight":
         case "KeyC":
           this.press("roll");
           break;
@@ -256,7 +259,13 @@ export class Input {
     tap("tSwitch", () => this.press("switch"));
     tap("tJump", () => this.press("jump"));
     tap("tRoll", () => this.press("roll"));
+    tap("tDash", () => this.setTouchDash(!this.touchDash));
     tap("tPause", () => this.press("pause"));
+  }
+
+  private setTouchDash(on: boolean) {
+    this.touchDash = on;
+    document.getElementById("tDash")?.classList.toggle("active", on);
   }
 
   reset() {

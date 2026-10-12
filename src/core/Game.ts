@@ -15,6 +15,7 @@ import {
   Mesh,
   MeshBuilder,
   PhotoDome,
+  Quaternion,
   SSAO2RenderingPipeline,
   Scene,
   ShadowGenerator,
@@ -42,19 +43,22 @@ import type { Enemy } from "../enemies/Enemy";
 import { antTemplateMeshes } from "../enemies/Ant";
 import { spiderTemplateMeshes } from "../enemies/Spider";
 import { flyerTemplateMeshes } from "../enemies/Flyer";
-import { clamp, damp, rand } from "./MathUtil";
+import { Colossus, colossusTemplateMeshes } from "../enemies/Colossus";
+import { clamp, damp, rand, raySphere } from "./MathUtil";
 import { sfx } from "./Audio";
 
 /** プレイヤー自身の爆発で受けるダメージの割合（地球防衛軍では自爆あり） */
 export const SELF_DAMAGE_RATE = 0.5;
 /** 死体（ラグドール）が物理演算される秒数 */
-const CORPSE_LIFE = 9;
+const CORPSE_LIFE = 15;
 
 interface Corpse {
   ragdoll: Ragdoll;
   nodes: TransformNode[];
   age: number;
   sinking: number; // >=0 なら沈下中
+  /** 当たり判定の大まかな半径 */
+  radius: number;
 }
 
 export interface GameOptions {
@@ -83,6 +87,8 @@ export class Game implements GameContext {
   private sun!: DirectionalLight;
   private shadowGen: ShadowGenerator | null = null;
   private corpses: Corpse[] = [];
+  private timers: { t: number; fn: () => void }[] = [];
+  colossus: Colossus | null = null;
   private camYaw = 0;
   private camPitch = 0.1;
   private camDist = 3.6;
@@ -165,10 +171,20 @@ export class Game implements GameContext {
     this.city = new City(scene, mats);
     this.city.build();
     this.city.onCollapseStart = (b) => {
+      // 建物が爆発して崩れ落ちる（見た目だけの爆発を時間差で連続させる）
+      const center = new Vector3(b.cx, b.height / 2, b.cz);
+      const n = this.quality.level === "low" ? 3 : 6;
+      for (let i = 0; i < n; i++) {
+        const p = new Vector3(b.cx + rand(-b.hw, b.hw), rand(0.2, 1) * b.height, b.cz + rand(-b.hd, b.hd));
+        this.later(i * 0.18, () => {
+          this.effects.explosion(p, Math.min(14, 5 + Math.max(b.hw, b.hd) * 0.4), false);
+          sfx.explosion(p, 1.2);
+        });
+      }
       this.effects.collapseDust(b.cx, b.cz, b.hw, b.hd, 1.5);
-      this.effects.addShake(Math.max(0, 0.5 - Vector3.Distance(this.player.position, b.mesh.position) / 300));
-      sfx.collapse(b.mesh.position);
-      this.spawnDebris(b.cx, b.top * 0.7, b.cz, Math.max(b.hw, b.hd));
+      this.effects.addShake(Math.max(0, 0.6 - Vector3.Distance(this.player.position, center) / 250));
+      sfx.collapse(center);
+      this.spawnDebris(b.cx, b.height * 0.6, b.cz, Math.max(b.hw, b.hd));
     };
     this.city.onCollapseEnd = (b) => this.effects.collapseDust(b.cx, b.cz, b.hw, b.hd, 0.8);
 
@@ -180,9 +196,12 @@ export class Game implements GameContext {
     const start = new Vector3(this.opts.mission.playerStart[0], 0.12, this.opts.mission.playerStart[1]);
     this.player = new Player(this, this.opts.loadout, this.difficulty.playerArmor, start);
     this.camYaw = Math.PI; // 最初は北（-Z）を向く
-    this.pickups = new Pickups(scene, (x, z) => this.city.heightAt(x, z));
+    this.pickups = new Pickups(scene, (x, z, y) => this.city.heightAt(x, z, y));
     this.pickups.onPickup = (k) => this.opts.hud.status(k === "armor" ? "アーマー強化" : "アーマー回復", 1.2);
     this.mission = new Mission(this.opts.mission, this.enemies, this.opts.hud, q.enemyScale);
+    this.mission.onEvent = (name) => {
+      if (name === "colossus") this.later(9, () => this.spawnColossus());
+    };
     this.enemies.onFirstAlert = () => this.opts.hud.radio([{ who: "本部", text: "敵が動き出したぞ！ 迎撃せよ！" }]);
     this.combat = this.makeCombatContext();
 
@@ -194,6 +213,7 @@ export class Game implements GameContext {
       ...antTemplateMeshes(scene),
       ...spiderTemplateMeshes(scene),
       ...flyerTemplateMeshes(scene),
+      ...colossusTemplateMeshes(scene),
     ]);
     this.setupPostProcess();
 
@@ -234,6 +254,15 @@ export class Game implements GameContext {
   private setupPostProcess() {
     const q = this.quality;
     const scene = this.scene;
+    if (!q.postProcess) {
+      // 軽量モード: ポストエフェクトなし。色調整だけマテリアル側で行う（ほぼ負荷なし）
+      const ip = scene.imageProcessingConfiguration;
+      ip.toneMappingEnabled = true;
+      ip.toneMappingType = ImageProcessingConfiguration.TONEMAPPING_ACES;
+      ip.exposure = 1.05;
+      ip.contrast = 1.1;
+      return;
+    }
     const p = new DefaultRenderingPipeline("post", true, scene, [this.camera]);
     p.fxaaEnabled = true;
     p.imageProcessingEnabled = true;
@@ -249,7 +278,7 @@ export class Game implements GameContext {
     p.bloomWeight = 0.3;
     p.bloomKernel = 64;
     p.bloomScale = 0.5;
-    if (q.level !== "low") {
+    {
       p.grainEnabled = true;
       p.grain.intensity = 5;
       p.grain.animated = true;
@@ -288,7 +317,10 @@ export class Game implements GameContext {
 
   private hitscan(origin: Vector3, dir: Vector3, range: number, def: WeaponDef): Vector3 {
     const wh = this.city.raycast(origin, dir, range);
-    const maxD = wh ? wh.dist : range;
+    let maxD = wh ? wh.dist : range;
+    // 死骸も弾を止める（撃たれた死骸は吹き飛ぶ）
+    const ch = this.corpseRay(origin, dir, maxD);
+    if (ch) maxD = ch.dist;
     const eh = this.enemies.raycast(origin, dir, maxD);
     let end: Vector3;
     if (eh) {
@@ -296,8 +328,13 @@ export class Game implements GameContext {
       eh.enemy.damage(dmg, dir, eh.point, def.knockback);
       this.effects.hitEnemy(eh.point, dir, eh.enemy.kind, def.damage > 60);
       this.opts.hud.hitMarker();
+      this.opts.hud.damage(eh.point, dmg, eh.mult > 1.2 ? "big" : eh.mult < 1 ? "weak" : "normal");
       sfx.hit();
       end = eh.point;
+    } else if (ch) {
+      this.effects.impact(ch.point, dir.scale(-1));
+      ch.push(dir.scale(def.damage * 4 + def.knockback * 30));
+      end = ch.point;
     } else if (wh) {
       this.effects.impact(wh.point, wh.normal);
       if (wh.building) this.city.damageBuilding(wh.building, def.damage * def.buildingDamage);
@@ -307,6 +344,62 @@ export class Game implements GameContext {
     }
     this.effects.tracer(this.player.muzzle(), end, "player", def.speed);
     return end;
+  }
+
+  /**
+   * レイと死骸（ラグドール）の交差。各パーツを球で近似して判定する。
+   * push(impulse) で当たったパーツを押せる（物理が止まった死骸は押せない）。
+   */
+  corpseRay(origin: Vector3, dir: Vector3, maxDist: number): { dist: number; point: Vector3; push: (imp: Vector3) => void } | null {
+    let best: { dist: number; point: Vector3; push: (imp: Vector3) => void } | null = null;
+    let bestD = maxDist;
+    const tmp = new Vector3();
+    for (const c of this.corpses) {
+      if (c.sinking >= 0) continue;
+      // 大まかな判定（死骸全体の球）
+      const root = c.ragdoll.parts[0].node.position;
+      const along = Vector3.Dot(root.subtract(origin), dir);
+      if (along < -c.radius || along > bestD + c.radius) continue;
+      if (raySphere(origin, dir, root, c.radius) < 0) continue;
+      for (let i = 0; i < c.ragdoll.parts.length; i++) {
+        const part = c.ragdoll.parts[i];
+        const n = part.node;
+        part.center.rotateByQuaternionToRef(n.rotationQuaternion ?? Quaternion.Identity(), tmp).addInPlace(n.position);
+        const r = Math.max(0.25, Math.min(part.size.x, part.size.y, part.size.z) * 0.5 + 0.15);
+        const t = raySphere(origin, dir, tmp, Math.max(r, Math.max(part.size.x, part.size.y, part.size.z) * 0.3));
+        if (t >= 0 && t < bestD) {
+          bestD = t;
+          const body = c.ragdoll.bodies[i];
+          const point = origin.add(dir.scale(t));
+          best = {
+            dist: t,
+            point,
+            push: (imp: Vector3) => {
+              if (!c.ragdoll.disposed && body) body.applyImpulse(imp, point);
+            },
+          };
+        }
+      }
+    }
+    return best;
+  }
+
+  /** 照準の先に有効射程内の敵がいるか（照準を赤くする） */
+  private aimInRange(): boolean {
+    const w = this.player.weapon;
+    if (!this.player.canAct) return false;
+    if (w.def.kind === "homing") return w.locks.length > 0 || !!w.lockingTarget;
+    const wh = this.city.raycast(this.aimO, this.aimD, w.def.range);
+    return !!this.enemies.raycast(this.aimO, this.aimD, wh ? wh.dist : w.def.range);
+  }
+
+  /** 線分と死骸（敵弾の遮蔽判定用）。当たった距離を返す */
+  corpseSegment(a: Vector3, b: Vector3): number | null {
+    const d = b.subtract(a);
+    const len = d.length();
+    if (len < 1e-6 || this.corpses.length === 0) return null;
+    const h = this.corpseRay(a, d.scaleInPlace(1 / len), len);
+    return h ? h.dist : null;
   }
 
   private lockCandidates(def: WeaponDef): Enemy[] {
@@ -344,6 +437,7 @@ export class Game implements GameContext {
         dir.y = Math.max(dir.y, 0) + 0.5;
         dir.normalize();
         enemy.damage(damage * k, dir, pos, knockback * k);
+        this.opts.hud.damage(enemy.center(), damage * k, "big");
         this.effects.hitEnemy(enemy.center(), dir.scale(-1), enemy.kind, true);
       }
     }
@@ -376,7 +470,44 @@ export class Game implements GameContext {
   }
 
   addCorpse(r: Ragdoll, nodes: TransformNode[]) {
-    this.corpses.push({ ragdoll: r, nodes, age: 0, sinking: -1 });
+    const root = r.parts[0].node.position;
+    let radius = 1;
+    for (const p of r.parts) radius = Math.max(radius, Vector3.Distance(p.node.position, root) + Math.max(p.size.x, p.size.y, p.size.z));
+    this.corpses.push({ ragdoll: r, nodes, age: 0, sinking: -1, radius });
+  }
+
+  /** 超巨大生物の演出: プレイヤーから見える位置の高めのビルの陰に出す */
+  spawnColossus() {
+    if (this.colossus) return;
+    const p = this.player.position;
+    const cands = this.city.buildings.filter((b) => {
+      if (b.state !== "standing" || b.height < 22 || b.kind === "monument") return false;
+      const d = Math.hypot(b.cx - p.x, b.cz - p.z);
+      return d > 60 && d < 160;
+    });
+    if (!cands.length) return;
+    // プレイヤーから頭が見える（間に別の建物がない）ものだけ。正面に近いビルを優先
+    const fwd = new Vector3(Math.sin(this.camYaw), 0, Math.cos(this.camYaw));
+    const eye = this.player.chest;
+    let best: { b: (typeof cands)[0]; side: number; score: number } | null = null;
+    for (const b of cands) {
+      for (const side of [1, -1]) {
+        const head = Colossus.path(p, b, side)[3];
+        const hit = this.city.segment(eye, head);
+        if (hit && hit.dist < Vector3.Distance(eye, head) - 3) continue;
+        const dir = new Vector3(b.cx - p.x, 0, b.cz - p.z).normalize();
+        const score = Vector3.Dot(dir, fwd) + b.height / 100 + Math.random() * 0.2;
+        if (!best || score > best.score) best = { b, side, score };
+      }
+    }
+    if (!best) return;
+    this.colossus = new Colossus(this, best.b, best.side);
+    this.effects.addShake(0.4);
+  }
+
+  /** t 秒後に fn を実行（ゲーム内時間。ポーズ中は進まない） */
+  later(t: number, fn: () => void) {
+    this.timers.push({ t, fn });
   }
 
   dropItem(pos: Vector3) {
@@ -388,7 +519,6 @@ export class Game implements GameContext {
   private spawnDebris(x: number, y: number, z: number, size: number) {
     if (!this.debrisTpl) {
       this.debrisTpl = MeshBuilder.CreateBox("debris", { width: 2, height: 1.4, depth: 1.6 }, this.scene);
-      this.debrisTpl.material = this.city.buildings[0]?.mesh.material ?? null;
       const m = this.scene.getMaterialByName("rubble");
       if (m) this.debrisTpl.material = m;
       this.debrisTpl.position.y = -3000;
@@ -428,6 +558,14 @@ export class Game implements GameContext {
     const input = this.opts.input;
     const hud = this.opts.hud;
     this.time += dt;
+    for (let i = this.timers.length - 1; i >= 0; i--) {
+      const tm = this.timers[i];
+      tm.t -= dt;
+      if (tm.t <= 0) {
+        this.timers.splice(i, 1);
+        tm.fn();
+      }
+    }
 
     // 視点操作
     const zoom = input.zoom && this.player.canAct;
@@ -443,9 +581,11 @@ export class Game implements GameContext {
     this.pickups.update(dt, this.player, this.time);
     this.city.update(dt);
     this.updateCorpses(dt);
+    if (this.colossus && !this.colossus.update(dt)) this.colossus = null;
     this.effects.update(dt);
     this.mission.update(dt, this.player.alive);
     this.updateCamera(dt, zoomK);
+    this.opts.hud.inRange = this.aimInRange();
     sfx.setListener(this.camera.position);
 
     if (this.shadowGen && !(this.shadowGen instanceof CascadedShadowGenerator)) {

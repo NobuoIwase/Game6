@@ -167,13 +167,24 @@ export class Projectiles {
       const segLen = Vector3.Distance(p.prev, p.pos);
       if (p.kind === "rocket" || p.kind === "missile") {
         const eh = ctx.enemies.segment(p.prev, p.pos, 0.3);
-        const hitT = Math.min(eh ? eh.dist : Infinity, wh ? wh.dist : Infinity);
+        const ch = ctx.corpseSegment(p.prev, p.pos);
+        const hitT = Math.min(eh ? eh.dist : Infinity, wh ? wh.dist : Infinity, ch ?? Infinity);
         if (hitT <= segLen || p.life <= 0) {
           const at = hitT <= segLen ? p.prev.add(p.vel.normalizeToNew().scale(hitT)) : p.pos;
           this.explodePlayer(p, at);
           continue;
         }
       } else {
+        // 死骸に当たった敵弾は止まる（死骸が壁になる）
+        const ch = ctx.corpseSegment(p.prev, p.pos);
+        if (ch !== null && (!wh || ch < wh.dist)) {
+          const at = p.prev.add(p.vel.normalizeToNew().scale(ch));
+          if (p.kind === "bomb") {
+            ctx.explode({ pos: at, radius: FLYER_BOMB_RADIUS, damage: p.damage, knockback: 14, source: "enemy", buildingDamage: 0.4 });
+          } else ctx.effects.puff(at, 1, 0.4);
+          this.release(p);
+          continue;
+        }
         const r = HIT_RADIUS[p.kind];
         const hitPlayer = player.alive && !player.invulnerable && distSegmentSegmentSq(p.prev, p.pos, pFeet, pHead) < (r + 0.4) * (r + 0.4);
         if (hitPlayer) {

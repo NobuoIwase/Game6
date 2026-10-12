@@ -22,7 +22,7 @@ export class Pickups {
 
   constructor(
     scene: Scene,
-    private heightAt: (x: number, z: number) => number,
+    private heightAt: (x: number, z: number, fromY: number) => number,
   ) {
     const mk = (name: string, color: Color3) => {
       const m = MeshBuilder.CreateBox(name, { size: 0.7 }, scene);
@@ -50,7 +50,7 @@ export class Pickups {
     for (let i = this.items.length - 1; i >= 0; i--) {
       const it = this.items[i];
       it.life -= dt;
-      const g = this.heightAt(it.pos.x, it.pos.z) + 0.5;
+      const g = this.heightAt(it.pos.x, it.pos.z, it.pos.y) + 0.5;
       it.vy -= 15 * dt;
       it.pos.y += it.vy * dt;
       if (it.pos.y < g) {

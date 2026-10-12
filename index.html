@@ -34,9 +34,9 @@
         <label>難易度 <select id="difficulty"></select></label>
         <label>画質 <select id="quality">
           <option value="auto">自動</option>
-          <option value="low">低（スマホ向け）</option>
-          <option value="medium">中</option>
-          <option value="high">高</option>
+          <option value="low">低（スマホ向け・軽い）</option>
+          <option value="medium">中（PC標準・軽い）</option>
+          <option value="high">高（影・ポストエフェクトあり・重い）</option>
         </select></label>
       </div>
       <button id="startBtn" class="btn">出撃</button>
@@ -55,6 +55,7 @@
     <div id="crosshair"><div class="ch-dot"></div></div>
     <div id="hitmarker"></div>
     <div id="lockLayer"></div>
+    <div id="dmgLayer"></div>
     <div id="weaponPanel">
       <div class="wp-sub" id="wpSub"></div>
       <div class="wp-main">
@@ -80,6 +81,7 @@
     <div class="tbtn small" id="tSwitch">武器切替</div>
     <div class="tbtn small" id="tJump">ジャンプ</div>
     <div class="tbtn small" id="tRoll">回避</div>
+    <div class="tbtn small" id="tDash">ダッシュ</div>
     <div class="tbtn tiny" id="tPause">Ⅱ</div>
   </div>
 

@@ -33,10 +33,14 @@ export type WaveTrigger =
   /** 前のウェーブ発生から t 秒経過 */
   | { kind: "time"; t: number };
 
+/** ウェーブ発生時の特殊演出。"colossus" = 超巨大生物がビルの陰から覗く */
+export type WaveEvent = "colossus";
+
 export interface WaveDef {
   trigger: WaveTrigger;
   groups: SpawnGroup[];
   radio: RadioLine[];
+  events?: WaveEvent[];
 }
 
 export interface MissionDef {
@@ -102,7 +106,10 @@ export const MISSIONS: MissionDef[] = [
           { who: OP, text: "南方より巨大生物の増援！ 数が多い！" },
           { who: OP, text: "西の空に飛行物体、編隊を組んで接近中！", delay: 3 },
           { who: CAP, text: "うろたえるな！ 迎え撃て！", delay: 2.5 },
+          { who: OP, text: "……待ってください。ビルの陰に、とてつもなく大きな反応が……！", delay: 4 },
+          { who: HQ, text: "なんだ、あれは……。こちらを、見ているのか……？", delay: 5 },
         ],
+        events: ["colossus"],
       },
       {
         trigger: { kind: "remaining", count: 6 },

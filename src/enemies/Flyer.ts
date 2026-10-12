@@ -86,6 +86,8 @@ export class FlyerSquad {
   phase: "patrol" | "approach" | "extend" = "patrol";
   pass = 0;
   bombing = false;
+  /** 爆撃中は編隊ごと裏返って飛ぶ（裏返っている間だけ爆弾を落とす） */
+  inverted = false;
   phaseT = 0;
   target = new Vector3();
   side = 1;
@@ -159,7 +161,9 @@ export class Flyer extends Enemy {
       { node: this.wingL, parent: -1, size: V(3.2, 0.2, 2.2), center: V(-1.9, 0, -0.9), mass: 60 },
       { node: this.wingR, parent: -1, size: V(3.2, 0.2, 2.2), center: V(1.9, 0, -0.9), mass: 60 },
     ];
-    this.speed = 14;
+    this.speed = 10;
+    // 速度ベクトル this.vel で飛ぶ（慣性のある飛行: 加速度に上限があり、ゆっくり大きく旋回する）
+    this.vel.set(0, 0, 10);
     this.updateHitSpheres();
   }
 
@@ -187,27 +191,26 @@ export class Flyer extends Enemy {
     const pitch = -Math.asin(clamp(this.heading.y, -1, 1));
     this.yawRate = this.yawRate + (angleDiff(this.prevYaw, yaw) / Math.max(dt, 1e-4) - this.yawRate) * damp(6, dt);
     this.prevYaw = yaw;
-    const targetBank = clamp(-this.yawRate * 1.6, -2.7, 2.7);
-    this.bank += (targetBank - this.bank) * damp(4, dt);
+    // 爆撃時は裏返る。それ以外は旋回に応じて大きくバンク
+    const targetBank = this.squad.inverted && this.active ? (this.bank >= 0 ? Math.PI : -Math.PI) : clamp(-this.yawRate * 3, -1.6, 1.6);
+    this.bank += (targetBank - this.bank) * damp(3, dt);
     Quaternion.RotationYawPitchRollToRef(yaw, pitch, this.bank, this.root.rotationQuaternion!);
   }
 
-  private steer(desired: Vector3, turnRate: number, speed: number, dt: number) {
-    const d = desired.normalizeToNew();
-    const h = this.heading;
-    const ang = Math.acos(clamp(Vector3.Dot(h, d), -1, 1));
-    const maxA = turnRate * dt;
-    if (ang > 1e-4) {
-      const t = Math.min(1, maxA / ang);
-      // 球面補間で旋回
-      const axis = Vector3.Cross(h, d);
-      if (axis.lengthSquared() < 1e-8) axis.copyFrom(Vector3.Up());
-      axis.normalize();
-      const q = Quaternion.RotationAxis(axis, ang * t);
-      h.rotateByQuaternionToRef(q, h).normalize();
-    }
-    this.speed += (speed - this.speed) * damp(1.5, dt);
-    this.position.addInPlace(h.scale(this.speed * dt));
+  /**
+   * 慣性のある操縦: 目標速度へ向けて、最大加速度 accel（m/s²）でしか速度を変えられない。
+   * そのため旋回は大きく膨らみ、異星の機械らしい「滑るような」動きになる。
+   */
+  private steer(desired: Vector3, accel: number, speed: number, dt: number) {
+    const want = desired.normalizeToNew().scaleInPlace(speed);
+    const dv = want.subtract(this.vel);
+    const max = accel * dt;
+    const l = dv.length();
+    if (l > max) dv.scaleInPlace(max / l);
+    this.vel.addInPlace(dv);
+    this.speed = this.vel.length();
+    if (this.speed > 0.5) this.heading.copyFrom(this.vel).scaleInPlace(1 / this.speed);
+    this.position.addInPlace(this.vel.scale(dt));
     this.avoidBuildings(dt);
   }
 
@@ -229,7 +232,7 @@ export class Flyer extends Enemy {
       sq.orbitAngle += dt * 0.22;
       const r = 45;
       const tgt = sq.home.add(new Vector3(Math.cos(sq.orbitAngle) * r, 55 - sq.home.y, Math.sin(sq.orbitAngle) * r));
-      this.steer(tgt.subtract(this.position), 0.8, 16, dt);
+      this.steer(tgt.subtract(this.position), 3, 9, dt);
       const pd = Vector3.Distance(player.position, this.position);
       if (pd < this.def.detectRange) this.ctx.enemies.alert(this);
       return;
@@ -248,21 +251,27 @@ export class Flyer extends Enemy {
         const side = new Vector3(-toP.z, 0, toP.x).normalize().scale(sq.bombing ? 0 : sq.side * 12);
         const aim = pp.add(side).add(new Vector3(0, alt, 0));
         const toAim = aim.subtract(this.position);
-        this.steer(toAim, 1.0, this.def.speed, dt);
+        this.steer(toAim, 6, this.def.speed, dt);
         const hd = Math.hypot(toAim.x, toAim.z);
+        sq.inverted = sq.bombing && hd < 150; // 爆撃航過: 手前から裏返り始める
         const facing = Vector3.Dot(new Vector3(toAim.x, 0, toAim.z).normalize(), new Vector3(this.heading.x, 0, this.heading.z).normalize());
-        if (hd < 18 || (facing < 0 && sq.phaseT > 2)) {
+        // 頭上を通過したら離脱へ（慣性で大回りするので、遠くで背を向けている間は旋回を続ける）
+        if (hd < 22 || (facing < 0 && hd < 70 && sq.phaseT > 2) || sq.phaseT > 25) {
           sq.phase = "extend";
           sq.phaseT = 0;
           sq.target = this.position.add(new Vector3(this.heading.x, 0, this.heading.z).normalize().scale(rand(110, 150)));
           sq.target.y = alt + rand(5, 15);
+          // マップの外へ飛び去らないように
+          sq.target.x = clamp(sq.target.x, -210, 210);
+          sq.target.z = clamp(sq.target.z, -210, 210);
         }
         break;
       }
       case "extend": {
         // 通過後は直進して離脱し、反転して次の航過へ
-        this.steer(sq.target.subtract(this.position), 0.9, this.def.speed * 1.1, dt);
-        if (sq.phaseT > 3.5 || Vector3.Distance(sq.target, this.position) < 20) {
+        sq.inverted = sq.bombing && sq.phaseT < 3;
+        this.steer(sq.target.subtract(this.position), 6, this.def.speed * 1.1, dt);
+        if (sq.phaseT > 4.5 || Vector3.Distance(sq.target, this.position) < 20) {
           sq.phase = "approach";
           sq.phaseT = 0;
           sq.pass++;
@@ -288,7 +297,7 @@ export class Flyer extends Enemy {
     const dist = to.length();
     // 遅れていれば加速、近ければ隊長機と同じ向き
     const desired = dist > 3 ? to.normalize().scale(Math.min(1, dist / 30)).add(L.heading.scale(1 - Math.min(1, dist / 30))) : L.heading.clone();
-    this.steer(desired, 2.2, L.speed * clamp(0.9 + dist / 25, 0.8, 1.6), dt);
+    this.steer(desired, 9, L.speed * clamp(0.9 + dist / 25, 0.8, 1.6), dt);
     void lq;
     if (this.active) this.attack(dt);
   }
@@ -299,19 +308,20 @@ export class Flyer extends Enemy {
     if (!player.alive) return;
     const toP = player.chest.subtract(this.position);
     const dist = toP.length();
-    if (sq.bombing) {
-      // 絨毯爆撃: プレイヤー周辺の上空で一定間隔に投下
+    const inverted = Math.abs(this.bank) > 2.4;
+    if (inverted) {
+      // 絨毯爆撃: 裏返っている間、一定間隔で投下
       const hd = Math.hypot(toP.x, toP.z);
-      if (hd < 70 && this.bombCd <= 0) {
-        this.bombCd = 0.32 + Math.random() * 0.1;
+      if (hd < 90 && this.bombCd <= 0) {
+        this.bombCd = 0.45 + Math.random() * 0.15;
         const v = this.heading.scale(this.speed * 0.9).add(new Vector3(0, -2, 0));
         this.ctx.projectiles.spawnEnemy("bomb", this.position.add(new Vector3(0, -1.2, 0)), v, FLYER_BOMB_DAMAGE * this.ctx.difficulty.enemyDamage);
         sfx.enemyShot(this.position, "bomb");
       }
-    } else if (sq.phase === "approach") {
+    } else if (sq.phase === "approach" && !sq.bombing && Math.abs(this.bank) < 1.2) {
       // 機銃掃射: 機首方向にプレイヤーがいれば連射
       const facing = Vector3.Dot(toP.scale(1 / dist), this.heading);
-      if (dist < this.def.attackRange && facing > 0.8 && this.gunCd <= 0) {
+      if (dist < this.def.attackRange && facing > 0.7 && this.gunCd <= 0) {
         this.gunCd = this.def.attackInterval * rand(0.8, 1.6);
         const muzzle = this.position.add(this.heading.scale(2.5));
         const v = spreadDir(toP.normalize(), 3.5).scale(160);
@@ -323,12 +333,12 @@ export class Flyer extends Enemy {
 
   protected onKnock(dir: Vector3, knock: number) {
     // 爆風で機体が揺さぶられる
-    this.heading.addInPlace(dir.scale(knock * 0.01)).normalize();
+    this.vel.addInPlace(dir.scale(knock * 0.3));
   }
 
   protected onDeath(dir: Vector3, force: number) {
     sfx.explosion(this.position, 0.6);
-    const v = this.heading.scale(this.speed * 0.8).add(dir.scale(force * 0.3)).add(new Vector3(0, 3, 0));
+    const v = this.vel.scale(0.8).add(dir.scale(force * 0.3)).add(new Vector3(0, 3, 0));
     const r = new Ragdoll(this.ctx.scene, this.rig, { velocity: v, spin: 5 });
     this.ctx.addCorpse(
       r,
