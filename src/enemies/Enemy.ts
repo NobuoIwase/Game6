@@ -104,6 +104,7 @@ export abstract class Enemy {
     this.stagger = Math.min(0.6, Math.max(this.stagger, 0.18) + (amount / this.maxHp) * 0.8);
     if (this.hp <= 0) {
       this.alive = false;
+      this.ctx.enemies.killed++;
       this.ctx.effects.gore(this.center(), this.kind);
       this.onDeath(dir, Math.min(40, knock + amount * 0.04));
       if (Math.random() < this.def.dropRate) this.ctx.dropItem(this.center());
@@ -179,7 +180,22 @@ export abstract class Enemy {
  *  ・建物に当たったら壁をよじ登り、屋上を歩き、反対側へ降りる
  *  ・爆風で吹き飛ばされると放物線を描いて落下する
  */
+/**
+ * 地上の敵の性格（出現時にランダム）。同じ種類でも動きがばらけて、群れが立体的に迫ってくる。
+ *  normal  … 標準。左右に少し散開しながら近づく
+ *  rusher  … 突撃型。ひたすら真っすぐ前へ。足が速く、遠くからはあまり撃たない
+ *  flanker … 回り込み型。大きく横へ回り込み、側面や背後から迫る
+ *  lurker  … 後衛型。距離を取って後ろで待機し、近づかれると下がりながら撃つ
+ */
+export type Temper = "normal" | "rusher" | "flanker" | "lurker";
+
+export function randomTemper(): Temper {
+  const r = Math.random();
+  return r < 0.35 ? "normal" : r < 0.6 ? "rusher" : r < 0.82 ? "flanker" : "lurker";
+}
+
 export abstract class GroundEnemy extends Enemy {
+  temper: Temper = randomTemper();
   airborne = false;
   climbing = 0; // -1 下降, 0 地面, +1 上昇
   pitch = 0;
@@ -263,13 +279,41 @@ export abstract class GroundEnemy extends Enemy {
     this.yaw += clamp(d, -rate * dt, rate * dt);
   }
 
+  /** 被弾で押し戻される水平速度（m/s）。撃ち続けると前線が押し返される */
+  protected shove = new Vector3();
+
   protected onKnock(dir: Vector3, knock: number, _point: Vector3) {
+    // 弾が当たるたびに押し戻される（重いほど動きにくい）
+    const sk = (knock * 2.2) / (this.def.mass / 300);
+    this.shove.x += dir.x * sk;
+    this.shove.z += dir.z * sk;
+    const l = this.shove.length();
+    if (l > 9) this.shove.scaleInPlace(9 / l);
     if (knock < 6) return;
     // 爆風で吹き飛ぶ
     const k = knock / (this.def.mass / 300);
     this.vel.set(dir.x * k, Math.max(4, k * 0.6), dir.z * k);
     this.airborne = true;
     this.spinRate = (Math.random() - 0.5) * 8;
+  }
+
+  /** 押し戻しを位置に反映して減衰させる（段差・壁の手前では止まる） */
+  protected applyShove(dt: number) {
+    const sv = this.shove;
+    if (sv.x * sv.x + sv.z * sv.z < 0.0025) return;
+    const p = this.position;
+    if (!this.airborne && this.climbing === 0) {
+      const nx = p.x + sv.x * dt,
+        nz = p.z + sv.z * dt;
+      const h = this.ctx.city.heightAt(nx, nz, p.y + 1);
+      if (Math.abs(h - p.y) < 0.6) {
+        p.x = nx;
+        p.z = nz;
+        p.y = h;
+        this.ctx.city.clampToMap(p, 4);
+      } else sv.setAll(0);
+    }
+    sv.scaleInPlace(Math.exp(-5 * dt));
   }
 
   /** 空中にいる間の処理。空中なら true を返す */

@@ -29,6 +29,7 @@ import type { DifficultyDef, MissionDef } from "../data/missions";
 import type { WeaponDef } from "../data/weapons";
 import { corpseBodyOf, CorpseBody, enableHavok, Ragdoll, RigPart } from "./Physics";
 import { buildNationStake } from "../world/Stake";
+import { Bot, BotOptions } from "./Bot";
 import { City } from "../world/City";
 import { createCityMaterials } from "../world/Materials";
 import { Effects } from "../combat/Effects";
@@ -49,7 +50,7 @@ import { clamp, damp, rand, raySphere } from "./MathUtil";
 import { sfx } from "./Audio";
 
 /** プレイヤー自身の爆発で受けるダメージの割合（地球防衛軍では自爆あり） */
-export const SELF_DAMAGE_RATE = 0.5;
+export const SELF_DAMAGE_RATE = 0.3;
 /** 死体（ラグドール）が物理演算される秒数 */
 const CORPSE_LIFE = 15;
 
@@ -92,8 +93,8 @@ export class Game implements GameContext {
   private corpses: Corpse[] = [];
   private timers: { t: number; fn: () => void }[] = [];
   colossus: Colossus | null = null;
-  private camYaw = 0;
-  private camPitch = 0.1;
+  camYaw = 0;
+  camPitch = 0.1;
   private camDist = 3.6;
   private camRecoil = 0;
   private fovBase = 0.95;
@@ -108,7 +109,7 @@ export class Game implements GameContext {
 
   private constructor(
     private engine: AbstractEngine,
-    private opts: GameOptions,
+    readonly opts: GameOptions,
   ) {
     this.difficulty = opts.difficulty;
     this.quality = opts.quality;
@@ -489,7 +490,7 @@ export class Game implements GameContext {
     }
     // 自爆・敵の爆撃
     const selfK = o.source === "player" ? SELF_DAMAGE_RATE : 1;
-    if (this.player.alive) this.player.applyBlast(pos, radius, damage * selfK, knockback);
+    if (this.player.alive) this.player.applyBlast(pos, radius, damage * selfK, knockback, o.source === "player" ? "self" : "bomb");
     // 建物
     this.city.damageArea(pos, radius, damage * (o.buildingDamage ?? 1));
     // 死体・車を吹き飛ばす
@@ -603,9 +604,19 @@ export class Game implements GameContext {
     input.endFrame();
   }
 
+  /** 自動操縦（AI のテストプレイ用。null なら人間が操作） */
+  bot: Bot | null = null;
+
+  /** 自動操縦を開始する（scripts/autoplay.mjs やブラウザのコンソールから） */
+  startBot(opts?: BotOptions) {
+    this.bot = new Bot(this, opts);
+    return this.bot;
+  }
+
   /** ゲームロジック1ステップ（描画は含まない） */
   update(dt: number) {
     const input = this.opts.input;
+    this.bot?.drive(dt);
     const hud = this.opts.hud;
     this.time += dt;
     this.casterT -= dt;

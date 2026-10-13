@@ -39,6 +39,8 @@ export class Player {
   private knockImmune = 0;
   private recoil = 0;
   private switchT = 0;
+  /** 受けたダメージの内訳（攻撃の種類 → 合計）。自動テストの集計用 */
+  damageLog: Record<string, number> = {};
   /** 被弾時の演出用（0..1） */
   hurtFlash = 0;
   dashing = false;
@@ -211,9 +213,10 @@ export class Player {
   }
 
   // ------------------------------------------------------------------ 被ダメージ
-  takeDamage(amount: number, from: Vector3, knock: number) {
+  takeDamage(amount: number, from: Vector3, knock: number, src = "other") {
     if (this.state === "dead") return;
     this.armor -= amount;
+    this.damageLog[src] = (this.damageLog[src] ?? 0) + amount;
     this.hurtFlash = Math.min(0.85, this.hurtFlash + 0.08 + amount / 150);
     sfx.hurt();
     const dir = this.position.subtract(from);
@@ -307,7 +310,7 @@ export class Player {
   }
 
   /** 爆風を受けたとき（Game.explode から） */
-  applyBlast(center: Vector3, radius: number, damage: number, knock: number) {
+  applyBlast(center: Vector3, radius: number, damage: number, knock: number, src = "explosion") {
     const c = this.chest;
     const d = Vector3.Distance(c, center);
     if (d > radius + 0.5) return;
@@ -317,10 +320,10 @@ export class Player {
     dir.normalize();
     if (this.soldier.ragdoll) {
       this.soldier.ragdoll.applyImpulse(dir.scale(knock * 40 * k), c);
-      this.takeDamage(damage * k, center, 0);
+      this.takeDamage(damage * k, center, 0, src);
       return;
     }
-    this.takeDamage(damage * k, center, 0);
+    this.takeDamage(damage * k, center, 0, src);
     if (this.alive && knock * k >= 6) this.knockdown(new Vector3(dir.x, 0, dir.z).normalize(), knock * k);
   }
 

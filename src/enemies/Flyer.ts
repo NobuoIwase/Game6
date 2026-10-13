@@ -7,7 +7,7 @@
 //  ・旋回時は大きくバンクし、急旋回ではほぼ裏返る
 //  ・最初は機銃掃射の航過を繰り返し、数回ごとに絨毯爆撃の航過に切り替わる
 // ============================================================================
-import { Color3, InstancedMesh, Mesh, MeshBuilder, PBRMaterial, Quaternion, Scene, Vector3 } from "@babylonjs/core";
+import { Color3, InstancedMesh, Matrix, Mesh, MeshBuilder, PBRMaterial, Quaternion, Scene, Vector3 } from "@babylonjs/core";
 import { ENEMIES, FLYER_BOMB_DAMAGE } from "../data/enemies";
 import type { GameContext } from "../core/GameContext";
 import { Enemy } from "./Enemy";
@@ -24,6 +24,8 @@ interface FlyerTemplates {
   core: Mesh;
 }
 const cache = new WeakMap<Scene, FlyerTemplates>();
+/** 機体の大きさの倍率（全幅 約9m） */
+const FS = 1.3;
 
 function templates(scene: Scene): FlyerTemplates {
   const c = cache.get(scene);
@@ -71,7 +73,10 @@ function templates(scene: Scene): FlyerTemplates {
   coreM.name = "flyerCore";
   coreM.material = glow;
   const t: FlyerTemplates = { hull: hullM, wingL: wing(-1), wingR: wing(1), core: coreM };
-  for (const m of Object.values(t)) hideTemplate(m);
+  for (const m of Object.values(t)) {
+    m.bakeTransformIntoVertices(Matrix.Scaling(FS, FS, FS));
+    hideTemplate(m);
+  }
   cache.set(scene, t);
   return t;
 }
@@ -109,7 +114,7 @@ export class FlyerSquad {
 
   /** 編隊内での位置（隊長機ローカル: x 右, y 上, z 前） */
   slot(index: number): Vector3 {
-    const sp = 7;
+    const sp = 9;
     if (this.formation === "line") return new Vector3((index % 2 ? 1 : -1) * Math.ceil(index / 2) * sp, 0, 0);
     if (this.formation === "wedge") {
       const row = Math.floor((index + 1) / 3);
@@ -162,11 +167,11 @@ export class Flyer extends Enemy {
     const core = inst(T.core);
     core.parent = this.hull;
     this.hitSpheres = [
-      { local: new Vector3(0, 0, 0.6), r: 1.6, world: new Vector3(), mult: 1 },
-      { local: new Vector3(2.4, 0, -1.1), r: 1.1, world: new Vector3(), mult: 1 },
-      { local: new Vector3(-2.4, 0, -1.1), r: 1.1, world: new Vector3(), mult: 1 },
+      { local: new Vector3(0, 0, 0.6 * FS), r: 1.6 * FS, world: new Vector3(), mult: 1 },
+      { local: new Vector3(2.4 * FS, 0, -1.1 * FS), r: 1.1 * FS, world: new Vector3(), mult: 1 },
+      { local: new Vector3(-2.4 * FS, 0, -1.1 * FS), r: 1.1 * FS, world: new Vector3(), mult: 1 },
     ];
-    const V = (x: number, y: number, z: number) => new Vector3(x, y, z);
+    const V = (x: number, y: number, z: number) => new Vector3(x * FS, y * FS, z * FS);
     // 撃墜時は関節なしでバラバラに飛び散る
     this.rig = [
       { node: this.hull, parent: -1, size: V(2.4, 0.9, 3.6), center: V(0, 0.1, 0), mass: 200 },

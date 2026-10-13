@@ -1,7 +1,7 @@
 # 引き継ぎ資料（HANDOFF）
 
 このプロジェクトを引き継ぐ AI / 開発者向けの資料です。README の「フォルダ構成」と合わせて読んでください。
-最終更新: 2026-10-13（v0.4.0）
+最終更新: 2026-10-13（v0.4.1）
 
 ---
 
@@ -90,7 +90,7 @@
 
 | 敵 | 待機中 | アクティブ時 |
 |---|---|---|
-| 蟻型 `Ant.ts` | 巣の周り 14m をうろつく | 個体ごとの `flank` 角で左右に散開して接近。射程 38m 以内で視線が通れば溜め 0.5 秒 → 酸 11 発を放物線で噴射。5.2m 以内は噛みつき。被弾で減速（`stagger`）|
+| 甲殻型（旧・蟻型） `Ant.ts` | 巣の周り 14m をうろつく | 個体ごとの `flank` 角で左右に散開して接近。射程 38m 以内で視線が通れば溜め 0.5 秒 → 酸 8 発を放物線で噴射。5.2m 以内は噛みつき。被弾で減速（`stagger`）と押し戻し。性格（`temper`）で接近の仕方が変わる（`chaseMove`）|
 | 蜘蛛型 `Spider.ts` | 時々向きを変えて小さく跳ねる | 好みの距離（22〜40m）を保つよう跳躍・横移動。射程 55m で溜め 0.35 秒 → 糸 8 本を扇状に発射（拘束値 +16/本）|
 | 飛行型 `Flyer.ts` | 隊長機が上空 55m を周回、僚機は編隊位置 | 慣性飛行（速度ベクトルを最大加速度 6m/s² でしか変えられない＝大回りでゆったり）。航過（approach）→ 離脱（extend）→ 半宙返り（loop）を繰り返す。機体の姿勢は加速度から求めた「上」ベクトルで決める（`Flyer.update`）。航過 1・2 回目は機銃、3 回目以降は奇数回目が爆撃航過で、編隊ごと裏返り、**裏返っている間だけ**爆弾を落とす（`|bank| > 2.4`）|
 | 超巨大生物 `Colossus.ts` | — | 演出のみ。ベジェ曲線に沿って首の節を並べ、伸びる→見つめる→引っ込む |
@@ -114,11 +114,21 @@
 - 回避は `animateRoll(k)`（k = 0..1）。`rollPivot`（腰の高さ）を回転・上下させ、脚・胴・頭のポーズを段階ごとに指定。`Player` の回避は 0.78 秒で速度も段階ごとに変える。
 - 確認方法: ゲームを `paused = true` にして `soldier.animate(...)` / `animateRoll(k)` を直接呼び、カメラを横に置いて `scene.render()`（下記「テスト・検証の方法」）。
 
+## 7.6 自動テストプレイ（v0.4.1〜）
+
+- `src/core/Bot.ts`: `Game.update` の先頭で `bot.drive(dt)` が Input の値（moveX/moveY/fire/dash、`press("roll")` など）と `camYaw`/`camPitch` を書き換える。人間の入力の代わりに同じ経路を通るので、ゲーム側に特別扱いはない。
+- `scripts/autoplay.mjs`: Vite の開発サーバーをスクリプト内で起動 → playwright-core でヘッドレス Chromium → 難易度を選んで出撃 → `startBot()` → `simulate(5)` を繰り返し、終了まで進める。
+- 被ダメージの内訳は `Player.damageLog`（`takeDamage(量, 位置, 吹き飛ばし, 種類)` の第 4 引数で集計）。撃破数は `EnemyManager.killed`。
+- 難易度を変えたら `npm run autoplay -- --difficulty easy --runs 3` などで、クリア率と被ダメージの内訳を確かめる。自動操縦は人間より照準が正確なので、「自動操縦でも危ない」なら人間には難しすぎる。下手な人を想定するときは `--aim 0.03 --turn 3`。
+
 ## 8. 調整用の主な定数
 
 | 定数 | 場所 | 意味 |
 |---|---|---|
-| `SELF_DAMAGE_RATE` | `core/Game.ts` | 自分の爆発で受けるダメージ倍率（0.5）|
+| `SELF_DAMAGE_RATE` | `core/Game.ts` | 自分の爆発で受けるダメージ倍率（0.3）|
+| `DIFFICULTIES` | `data/missions.ts` | 難易度ごとの敵の体力・攻撃力の倍率（EASY 0.6/0.4、NORMAL 0.85/0.7）|
+| `randomTemper` | `enemies/Enemy.ts` | 敵の性格の出現比率 |
+| 押し戻し `knock * 2.2 / (mass / 300)` | `enemies/Enemy.ts onKnock` | 1 発ごとの押し戻し速度（上限 9m/s、毎秒 e^-5 で減衰）|
 | `CORPSE_LIFE` | `core/Game.ts` | 死体の物理演算時間（15 秒）|
 | `STEP_UP` | `world/City.ts` | 登れる段差（0.6m）|
 | `S` | `enemies/Ant.ts`, `Spider.ts` | 敵の大きさの倍率（1.6）|

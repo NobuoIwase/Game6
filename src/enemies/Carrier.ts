@@ -25,7 +25,7 @@ import { sfx } from "../core/Audio";
 export const SHIP_HORNS = 8;
 const HORN_R0 = 10;
 const HORN_LEN = 17;
-const DOCK_R = 15;
+const DOCK_R = 16.5;
 const VENT_Y = 4.6;
 
 interface Templates {
@@ -220,7 +220,7 @@ export class Carrier extends Enemy {
     if (this.state === "breathe") {
       this.breathT += dt;
       const cyc = this.breathT % 10;
-      const want = cyc > 1.5 && cyc < 6.5 ? 1 : 0;
+      const want = cyc > 1.5 && cyc < 7.5 ? 1 : 0;
       if (want && this.breath === 0) this.ctx.enemies.carrierOpened?.(this);
       this.breath += Math.sign(want - this.breath) * Math.min(Math.abs(want - this.breath), dt / 0.9);
       this.updateBirth(dt);
@@ -360,7 +360,8 @@ export class Carrier extends Enemy {
         const k = this.birthHorn;
         this.birthHorn = -1;
         this.birthGlow = 0;
-        if (this.ctx.enemies.list.filter((e) => e.kind === "ant" || e.kind === "spider").length > 40) return;
+        // 生み出した敵が残っている間は増やしすぎない
+        if (this.ctx.enemies.list.filter((e) => e.alive && (e.kind === "ant" || e.kind === "spider")).length > 14) return;
         const p = this.pores[k].getAbsolutePosition().clone();
         const out = p.subtract(this.position);
         out.y = 0;
@@ -370,7 +371,7 @@ export class Carrier extends Enemy {
         sfx.squish(p);
       }
     } else if (this.birthCd <= 0) {
-      this.birthCd = rand(3.5, 5.5);
+      this.birthCd = rand(6, 8);
       this.birthHorn = Math.floor(Math.random() * SHIP_HORNS);
     }
   }

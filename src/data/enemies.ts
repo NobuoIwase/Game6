@@ -34,7 +34,7 @@ export const ENEMIES: Record<EnemyType, EnemyDef> = {
   carrier: {
     type: "carrier",
     name: "戦艦級（スポーンシップ）",
-    hp: 2600,
+    hp: 1600,
     speed: 22,
     detectRange: 9999,
     alertRadius: 0,
@@ -90,5 +90,5 @@ export const ENEMIES: Record<EnemyType, EnemyDef> = {
 };
 
 /** 爆撃機（飛行型）の爆弾ダメージ */
-export const FLYER_BOMB_DAMAGE = 55;
+export const FLYER_BOMB_DAMAGE = 40;
 export const FLYER_BOMB_RADIUS = 7;

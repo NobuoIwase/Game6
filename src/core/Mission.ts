@@ -28,6 +28,7 @@ export class Mission {
   update(dt: number, playerAlive: boolean) {
     if (this.result !== "playing") return;
     this.elapsed += dt;
+    this.kills = this.enemies.killed;
     this.sinceWave += dt;
     const next = this.def.waves[this.waveIndex];
     if (next) {

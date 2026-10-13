@@ -167,7 +167,9 @@ export class Projectiles {
       const segLen = Vector3.Distance(p.prev, p.pos);
       if (p.kind === "rocket" || p.kind === "missile") {
         const eh = ctx.enemies.segment(p.prev, p.pos, 0.3);
-        const ch = ctx.corpseSegment(p.prev, p.pos);
+        // 発射直後（自分から 8m 以内）は足元の死骸に当たらない＝目の前で暴発して自爆しない
+        const armed = Vector3.DistanceSquared(p.pos, player.position) > 64;
+        const ch = armed ? ctx.corpseSegment(p.prev, p.pos) : null;
         const hitT = Math.min(eh ? eh.dist : Infinity, wh ? wh.dist : Infinity, ch ?? Infinity);
         if (hitT <= segLen || p.life <= 0) {
           const at = hitT <= segLen ? p.prev.add(p.vel.normalizeToNew().scale(hitT)) : p.pos;
@@ -212,15 +214,15 @@ export class Projectiles {
     const player = ctx.player;
     switch (p.kind) {
       case "acid":
-        player.takeDamage(p.damage, p.prev, 0);
+        player.takeDamage(p.damage, p.prev, 0, "acid");
         ctx.effects.hitEnemy(player.chest, p.vel.normalizeToNew(), "ant");
         break;
       case "web":
-        player.takeDamage(p.damage, p.prev, 0);
+        player.takeDamage(p.damage, p.prev, 0, "web");
         player.addBind(16);
         break;
       case "laser":
-        player.takeDamage(p.damage, p.prev, 0);
+        player.takeDamage(p.damage, p.prev, 0, "laser");
         ctx.effects.impact(player.chest, p.vel.normalizeToNew().scale(-1));
         break;
       case "bomb":

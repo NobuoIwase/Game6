@@ -1,16 +1,18 @@
 {
   "name": "edf-like-test",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "scripts": {
     "dev": "vite --host",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
     "typecheck": "tsc --noEmit",
-    "fetch-assets": "node scripts/fetch-assets.mjs"
+    "fetch-assets": "node scripts/fetch-assets.mjs",
+    "autoplay": "node scripts/autoplay.mjs"
   },
   "devDependencies": {
+    "playwright-core": "^1.56.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
   },

@@ -62,9 +62,9 @@ export interface DifficultyDef {
 }
 
 export const DIFFICULTIES: DifficultyDef[] = [
-  { id: "easy", name: "EASY", enemyHp: 0.7, enemyDamage: 0.6, playerArmor: 800 },
-  { id: "normal", name: "NORMAL", enemyHp: 1.0, enemyDamage: 1.0, playerArmor: 600 },
-  { id: "hard", name: "HARD", enemyHp: 1.6, enemyDamage: 1.6, playerArmor: 600 },
+  { id: "easy", name: "EASY", enemyHp: 0.6, enemyDamage: 0.4, playerArmor: 800 },
+  { id: "normal", name: "NORMAL", enemyHp: 0.85, enemyDamage: 0.7, playerArmor: 600 },
+  { id: "hard", name: "HARD", enemyHp: 1.4, enemyDamage: 1.3, playerArmor: 600 },
   { id: "inferno", name: "INFERNO", enemyHp: 3.0, enemyDamage: 3.2, playerArmor: 600 },
 ];
 

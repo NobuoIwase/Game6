@@ -236,6 +236,7 @@ export class Ant extends GroundEnemy {
     }
     if (!this.active) this.idle(dt);
     else this.combat(dt);
+    this.applyShove(dt);
     this.applyOrientation(dt);
     this.animateLegs(dt, this.moveSpeed);
     // 腹部の曲げ（酸の噴射姿勢）
@@ -308,7 +309,9 @@ export class Ant extends GroundEnemy {
           break;
         }
         // 射程内で視線が通れば酸を撃つ
-        const inRange = dist < this.def.attackRange && dist > this.def.radius + 5;
+        // 突撃型は近くまで来ないと撃たない
+        const maxRange = this.temper === "rusher" ? 22 : this.def.attackRange;
+        const inRange = dist < maxRange && dist > this.def.radius + 5;
         if (inRange && this.cooldown <= 0 && this.repositionT <= 0 && this.climbing === 0 && player.alive) {
           const mouth = this.center().add(new Vector3(0, 1.0 * S, 0));
           if (this.canSee(mouth)) {
@@ -319,15 +322,7 @@ export class Ant extends GroundEnemy {
           }
         }
         this.repositionT -= dt;
-        // 左右に散開しながら近づく（包囲）
-        const flankK = clamp((dist - 12) / 50, 0, 1) * this.flank * 0.9;
-        const c = Math.cos(flankK),
-          s = Math.sin(flankK);
-        const dir = new Vector3(to.x * c - to.z * s, 0, to.x * s + to.z * c);
-        this.turnTo(yawOf(dir), 3.5, dt);
-        const f = new Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-        const stop = dist < this.def.radius + 1.5 ? 0 : 1;
-        this.walk(f, this.def.speed * stop, dt);
+        this.chaseMove(to, dist, dt);
         break;
       }
       case "windup":
@@ -350,7 +345,7 @@ export class Ant extends GroundEnemy {
         this.moveSpeed = 0;
         if (this.stateT > 0.45) {
           this.state = "chase";
-          this.cooldown = this.def.attackInterval * rand(0.8, 1.4);
+          this.cooldown = this.def.attackInterval * rand(0.8, 1.4) * (this.temper === "rusher" ? 1.5 : this.temper === "lurker" ? 0.85 : 1);
           if (Math.random() < 0.45) this.repositionT = rand(1, 2.5);
         }
         break;
@@ -359,7 +354,7 @@ export class Ant extends GroundEnemy {
         this.moveSpeed = 0;
         if (this.stateT > 0.25 && this.biteCd <= 0) {
           if (dist < this.def.radius + 4) {
-            player.takeDamage(18 * this.ctx.difficulty.enemyDamage, this.position, 3);
+            player.takeDamage(18 * this.ctx.difficulty.enemyDamage, this.position, 3, "bite");
             sfx.squish(this.position);
           }
           this.biteCd = 1.4;
@@ -372,6 +367,47 @@ export class Ant extends GroundEnemy {
     }
   }
 
+  /** 性格ごとの接近の仕方 */
+  private chaseMove(to: Vector3, dist: number, dt: number) {
+    const stop = dist < this.def.radius + 1.5 ? 0 : 1;
+    const side = this.flank >= 0 ? 1 : -1;
+    const perp = new Vector3(-to.z * side, 0, to.x * side);
+    switch (this.temper) {
+      case "lurker": {
+        // 後ろで待機: 30〜40m を保ち、近づかれたらプレイヤーを向いたまま後ずさる
+        this.turnTo(yawOf(to), 3, dt);
+        if (dist < 28) this.walk(to.scale(-1).addInPlace(perp.scale(0.4)).normalize(), this.def.speed * 0.55, dt);
+        else if (dist < 40) this.walk(perp, this.def.speed * 0.2, dt);
+        else this.walk(to, this.def.speed * 0.8, dt);
+        return;
+      }
+      case "flanker": {
+        // 回り込み: プレイヤーの横（遠いほど大きく外側）を目指し、近くなってから向き直る
+        const goal = this.ctx.player.position.add(perp.scale(clamp(dist * 0.75, 0, 38))).subtract(this.position);
+        goal.y = 0;
+        const dir = dist < 20 ? to : goal.normalize();
+        this.turnTo(yawOf(dir), 3, dt);
+        this.walk(new Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)), this.def.speed * 1.05 * stop, dt);
+        return;
+      }
+      case "rusher": {
+        // ひたすら前へ
+        this.turnTo(yawOf(to), 4.5, dt);
+        this.walk(new Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)), this.def.speed * 1.15 * stop, dt);
+        return;
+      }
+      default: {
+        // 左右に少し散開しながら近づく（包囲）
+        const flankK = clamp((dist - 12) / 50, 0, 1) * this.flank * 0.9;
+        const c = Math.cos(flankK),
+          s = Math.sin(flankK);
+        const dir = new Vector3(to.x * c - to.z * s, 0, to.x * s + to.z * c);
+        this.turnTo(yawOf(dir), 3.5, dt);
+        this.walk(new Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)), this.def.speed * stop, dt);
+      }
+    }
+  }
+
   private sprayAcid() {
     // 腹部の先端から酸を放物線で一斉に飛ばす
     this.thorax.computeWorldMatrix(true);
@@ -380,7 +416,7 @@ export class Ant extends GroundEnemy {
     const speed = 42;
     const base = ballisticVelocity(tip, target, speed, GRAVITY);
     const dir = base.normalizeToNew();
-    const n = 11;
+    const n = 8;
     for (let i = 0; i < n; i++) {
       const v = spreadDir(dir, 5.5).scale(speed * rand(0.92, 1.06));
       this.ctx.projectiles.spawnEnemy("acid", tip, v, this.def.damage * this.ctx.difficulty.enemyDamage);

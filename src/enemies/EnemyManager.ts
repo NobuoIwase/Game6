@@ -25,6 +25,8 @@ export interface EnemyRayHit {
 export class EnemyManager {
   list: Enemy[] = [];
   squads: FlyerSquad[] = [];
+  /** 撃破数 */
+  killed = 0;
   private groupSeq = 0;
   /** 輸送船の出現・ハッチ開放（無線演出用） */
   onCarrier?: (c: Carrier) => void;

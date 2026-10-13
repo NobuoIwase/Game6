@@ -118,6 +118,10 @@ export class Spider extends GroundEnemy {
 
   constructor(ctx: GameContext, pos: Vector3, group: number) {
     super(ENEMIES.spider, ctx, pos, group);
+    // 性格で保ちたい距離を変える（突撃型は懐へ、後衛型は遠くから糸を撃つ）
+    if (this.temper === "rusher") this.preferDist = rand(8, 14);
+    else if (this.temper === "lurker") this.preferDist = rand(42, 52);
+    else if (this.temper === "flanker") this.preferDist = rand(20, 30);
     const T = templates(ctx.scene);
     const inst = (m: Mesh, parent: TransformNode, p: Vector3) => {
       const i = m.createInstance(m.name + this.id);
@@ -175,6 +179,7 @@ export class Spider extends GroundEnemy {
     }
     if (!this.active) this.idle(dt);
     else this.combat(dt);
+    this.applyShove(dt);
     this.applyOrientation(dt);
     this.animateLegs(dt, this.moveSpeed);
   }
@@ -239,7 +244,8 @@ export class Spider extends GroundEnemy {
       if (dist > this.preferDist + 12) dir = to.clone();
       else if (dist < this.preferDist - 10) dir = to.scale(-1);
       else dir = new Vector3(-to.z * this.strafeDir, 0, to.x * this.strafeDir);
-      if (Math.random() < 0.3) this.strafeDir *= -1;
+      // 回り込み型は同じ向きに回り続ける
+      if (this.temper !== "flanker" && Math.random() < 0.3) this.strafeDir *= -1;
       const range = clamp(Math.abs(dist - this.preferDist) + rand(8, 18), 10, 32);
       this.jump(dir.normalize(), range, rand(7, 12));
       return;
