@@ -369,11 +369,11 @@ export class Game implements GameContext {
       const before = eh.enemy.hp;
       eh.enemy.damage(dmg, dir, eh.point, def.knockback);
       const dealt = before - Math.max(0, eh.enemy.hp);
-      this.effects.hitEnemy(eh.point, dir, eh.enemy.kind, def.damage > 60);
+      this.effects.hitEnemy(eh.point, dir, eh.enemy.kind, Math.min(3, 0.6 + def.damage / 40));
       this.opts.hud.hitMarker();
       // 装甲で弾かれた（ほぼ効いていない）ときは数字を出さない
       if (dealt >= 0.5) this.opts.hud.damage(eh.point, dealt, eh.mult > 1.2 ? "big" : eh.mult < 1 ? "weak" : "normal");
-      sfx.hit();
+      sfx.hit(def.damage > 60, eh.enemy.kind === "flyer" || eh.enemy.kind === "carrier");
       end = eh.point;
     } else if (ch) {
       this.effects.impact(ch.point, dir.scale(-1));
