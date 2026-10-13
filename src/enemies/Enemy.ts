@@ -118,7 +118,11 @@ export abstract class Enemy {
    * 死亡ポーズのまま固まった1つの剛体にして物理演算へ（地上の巨大生物用）。
    * 死骸同士の重なりは物理演算で押し出されて軽く跳ねる。
    */
-  protected rigidize(velocity: Vector3, spin = 1.5) {
+  /**
+   * 死亡ポーズで固めた剛体の死骸にする。
+   * @param flip true なら前後軸まわりに転がして仰向けにする（ひっくり返った虫の死骸）
+   */
+  protected rigidize(velocity: Vector3, spin = 1.5, flip = false) {
     this.deathPose();
     // 地面にめり込まないよう、一番低いパーツが地面の少し上に来るまで持ち上げる
     this.root.computeWorldMatrix(true);
@@ -131,7 +135,14 @@ export abstract class Enemy {
     }
     const floor = this.ctx.city.heightAt(this.position.x, this.position.z, this.position.y + 1);
     if (low < floor + 0.15) this.root.position.y += floor + 0.15 - low;
-    const c = new RigidCorpse(this.ctx.scene, this.rig, { velocity, spin });
+    // 空中にいる時間（≒ 2vy/g）でちょうど半回転するくらいの角速度
+    let angular: Vector3 | undefined;
+    if (flip) {
+      const air = Math.max(0.4, (2 * Math.max(1, velocity.y)) / 9.81);
+      const fwd = new Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+      angular = fwd.scale(((Math.random() < 0.5 ? -1 : 1) * Math.PI * 0.9) / air);
+    }
+    const c = new RigidCorpse(this.ctx.scene, this.rig, { velocity, spin, angular });
     this.ctx.addCorpse(c, [c.root]);
     this.root.dispose();
   }
@@ -177,6 +188,39 @@ export abstract class GroundEnemy extends Enemy {
   protected bodyHeight = 1.5;
   protected spinRate = 0;
   moveSpeed = 0;
+
+  /** 戦艦級から生み出された直後（丸まった玉の状態） */
+  curled = false;
+  private curlT = 0;
+
+  /**
+   * 丸まった状態の処理。丸まっていれば true を返す。
+   * 玉のまま転がり落ち、着地して少し震えたあと、跳ねるように体を開いて活動を始める。
+   */
+  protected updateCurled(dt: number): boolean {
+    if (!this.curled) return false;
+    this.t += dt;
+    if (this.airborne) {
+      this.updateAir(dt);
+      if (!this.airborne) this.ctx.effects.puff(this.position, 4, this.def.radius * 0.5);
+    } else {
+      this.curlT += dt;
+      // 着地後: 小刻みに震えてから開く
+      this.roll = Math.sin(this.t * 30) * 0.08 * Math.min(1, this.curlT * 3);
+      if (this.curlT > 0.9) {
+        this.curled = false;
+        this.vel.set(0, 6, 0);
+        this.airborne = true;
+        this.spinRate = 0;
+        this.roll = 0;
+        this.activate(0.2);
+      }
+    }
+    this.applyOrientation(dt);
+    this.deathPose();
+    this.updateHitSpheres();
+    return true;
+  }
 
   /** XZ 方向 dir（正規化済み）へ速度 speed で移動を試みる */
   protected walk(dir: Vector3, speed: number, dt: number) {

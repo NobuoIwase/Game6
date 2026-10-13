@@ -33,7 +33,7 @@ export type WaveTrigger =
   /** 前のウェーブ発生から t 秒経過 */
   | { kind: "time"; t: number };
 
-/** ウェーブ発生時の特殊演出。"colossus" = 超巨大生物がビルの陰から覗く */
+/** ウェーブ発生時の特殊演出。"colossus" = 巨獣がビルの陰から覗く */
 export type WaveEvent = "colossus";
 
 export interface WaveDef {
@@ -77,9 +77,10 @@ export const MISSIONS: MissionDef[] = [
     id: "m01",
     name: "ミッション1：市街地の異変",
     desc:
-      "市街地に巨大生物が出現した。\n" +
-      "蟻型・蜘蛛型の巨大生物に加え、編隊を組んで飛行する侵略兵器が確認されている。\n" +
-      "待機中の敵は攻撃するか接近すると一斉に襲ってくる。各個撃破せよ。",
+      "上空から落下した巨大な「杭」が地面に突き刺さり、そこから分裂した生物が各地に広がっている。\n" +
+      "人類はこれらを総称して「アンカー」と呼ぶ。\n" +
+      "市街地に大型級（甲殻型・跳躍型）と、編隊を組む飛行型を確認。\n" +
+      "待機中のアンカーは攻撃するか接近すると一斉に襲ってくる。各個撃破せよ。",
     playerStart: [0, 6],
     waves: [
       {
@@ -91,7 +92,7 @@ export const MISSIONS: MissionDef[] = [
           { type: "flyer", count: 7, at: [60, 110], spread: 10, formation: "v" },
         ],
         radio: [
-          { who: OP, text: "作戦地域に到着。市街地に巨大生物の群れを確認しました。" },
+          { who: OP, text: "作戦地域に到着。市街地にアンカーの群れを確認しました。" },
           { who: HQ, text: "敵はまだこちらに気付いていない。攻撃を開始すれば一斉に襲ってくるぞ。", delay: 3.5 },
           { who: HQ, text: "陸戦兵、慎重に各個撃破せよ。", delay: 3.5 },
         ],
@@ -103,7 +104,7 @@ export const MISSIONS: MissionDef[] = [
           { type: "flyer", count: 6, at: [-180, 0], spread: 10, active: true, formation: "wedge" },
         ],
         radio: [
-          { who: OP, text: "南方より巨大生物の増援！ 数が多い！" },
+          { who: OP, text: "南方よりアンカーの増援！ 数が多い！" },
           { who: OP, text: "西の空に飛行物体、編隊を組んで接近中！", delay: 3 },
           { who: CAP, text: "うろたえるな！ 迎え撃て！", delay: 2.5 },
           { who: OP, text: "……待ってください。ビルの陰に、とてつもなく大きな反応が……！", delay: 4 },
@@ -120,9 +121,9 @@ export const MISSIONS: MissionDef[] = [
           { type: "carrier", count: 1, at: [-60, -110], spread: 0, active: true },
         ],
         radio: [
-          { who: OP, text: "新たな敵影！ 蜘蛛型が北東から接近中！" },
+          { who: OP, text: "新たな敵影！ 跳躍型が北東から接近中！" },
           { who: HQ, text: "これが最後の群れだ。ここで食い止めろ！", delay: 3 },
-          { who: OP, text: "蜘蛛型の糸に注意してください。絡まると身動きが取れなくなります！", delay: 3 },
+          { who: OP, text: "跳躍型の糸に注意してください。絡まると身動きが取れなくなります！", delay: 3 },
         ],
       },
     ],

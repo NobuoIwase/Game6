@@ -12,7 +12,7 @@ import { Enemy, GroundEnemy } from "./Enemy";
 import { Ant } from "./Ant";
 import { Spider } from "./Spider";
 import { Flyer, FlyerSquad } from "./Flyer";
-import { Carrier } from "./Carrier";
+import { Carrier, SHIP_HORNS } from "./Carrier";
 import { raySphere, rand } from "../core/MathUtil";
 
 export interface EnemyRayHit {
@@ -30,14 +30,17 @@ export class EnemyManager {
   onCarrier?: (c: Carrier) => void;
   carrierOpened?: (c: Carrier) => void;
 
-  /** 輸送船から蟻型を投下する（空中に出現し、落下して着地する） */
-  dropAnt(p: Vector3) {
-    const a = new Ant(this.ctx, p.clone(), ++this.groupSeq);
-    a.position.copyFrom(p);
-    a.airborne = true;
-    a.vel.set(rand(-2, 2), -3, rand(-2, 2));
-    a.activate(0.4);
-    this.list.push(a);
+  /**
+   * 戦艦級が生み落とした巨大生物。丸まった玉の状態で空中に出現し、
+   * 地面に落ちると体を開いて活動を始める。
+   */
+  birth(type: "ant" | "spider", p: Vector3, vel: Vector3) {
+    const e = type === "spider" ? new Spider(this.ctx, p.clone(), ++this.groupSeq) : new Ant(this.ctx, p.clone(), ++this.groupSeq);
+    e.position.copyFrom(p);
+    e.airborne = true;
+    e.curled = true;
+    e.vel.copyFrom(vel);
+    this.list.push(e);
   }
 
   /** 何かが起動したとき（無線演出用） */
@@ -63,6 +66,17 @@ export class EnemyManager {
       const c = new Carrier(this.ctx, from, group, center.add(new Vector3(0, 62, 0)));
       c.activate(0);
       this.list.push(c);
+      // とげのあいだの凹みに飛行型をはめ込んで運んでくる
+      const squad = new FlyerSquad(center.add(new Vector3(0, 55, 0)), "v");
+      const flyers: Flyer[] = [];
+      for (let i = 0; i < SHIP_HORNS; i++) {
+        const f = new Flyer(this.ctx, from.clone(), group, squad, i);
+        squad.members.push(f);
+        flyers.push(f);
+        this.list.push(f);
+      }
+      this.squads.push(squad);
+      c.dockFlyers(flyers);
       this.onCarrier?.(c);
       return;
     }

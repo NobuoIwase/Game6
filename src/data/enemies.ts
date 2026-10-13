@@ -33,7 +33,7 @@ export interface EnemyDef {
 export const ENEMIES: Record<EnemyType, EnemyDef> = {
   carrier: {
     type: "carrier",
-    name: "輸送船",
+    name: "戦艦級（スポーンシップ）",
     hp: 2600,
     speed: 22,
     detectRange: 9999,
@@ -47,7 +47,7 @@ export const ENEMIES: Record<EnemyType, EnemyDef> = {
   },
   ant: {
     type: "ant",
-    name: "巨大生物（蟻型）",
+    name: "アンカー大型級（甲殻型）",
     hp: 190,
     speed: 11,
     detectRange: 55,
@@ -61,7 +61,7 @@ export const ENEMIES: Record<EnemyType, EnemyDef> = {
   },
   spider: {
     type: "spider",
-    name: "巨大生物（蜘蛛型）",
+    name: "アンカー大型級（跳躍型）",
     hp: 130,
     speed: 14,
     detectRange: 65,
@@ -75,7 +75,7 @@ export const ENEMIES: Record<EnemyType, EnemyDef> = {
   },
   flyer: {
     type: "flyer",
-    name: "飛行型侵略兵器",
+    name: "アンカー飛行型",
     hp: 90,
     speed: 17,
     detectRange: 90,

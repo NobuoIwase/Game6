@@ -61,6 +61,8 @@ export interface RagdollOptions {
   impulsePoint?: Vector3;
   /** 回転の初速（ランダムなきりもみ用） */
   spin?: number;
+  /** 回転の初速（ワールド空間の角速度。spin のランダム成分に加算） */
+  angular?: Vector3;
 }
 
 export class Ragdoll {
@@ -238,7 +240,9 @@ export class RigidCorpse {
     this.bodies.push(body);
     body.setLinearVelocity(opts.velocity ?? Vector3.Zero());
     const spin = opts.spin ?? 0;
-    if (spin) body.setAngularVelocity(new Vector3((Math.random() - 0.5) * spin, (Math.random() - 0.5) * spin, (Math.random() - 0.5) * spin));
+    const av = new Vector3((Math.random() - 0.5) * spin, (Math.random() - 0.5) * spin, (Math.random() - 0.5) * spin);
+    if (opts.angular) av.addInPlace(opts.angular);
+    if (spin || opts.angular) body.setAngularVelocity(av);
   }
 
   applyImpulse(impulse: Vector3, point: Vector3) {

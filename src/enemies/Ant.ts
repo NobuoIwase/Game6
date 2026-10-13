@@ -7,47 +7,39 @@
 // ・ビルの壁をよじ登って最短距離で迫る
 // メッシュは InstancedMesh（同種パーツをまとめて1回で描画）で軽量化している。
 // ============================================================================
-import { Color3, InstancedMesh, Matrix, Mesh, MeshBuilder, Quaternion, Scene, TransformNode, Vector3 } from "@babylonjs/core";
-import { bakeT, cursorPlate, glowMaterial, merge, shard, shellMaterial } from "./AlienShapes";
+import { Color3, InstancedMesh, Mesh, MeshBuilder, Quaternion, Scene, TransformNode, Vector3 } from "@babylonjs/core";
+import { bakeT, glowMaterial, merge, shellMaterial } from "./AlienShapes";
+import { crescent, gem, poseLeg, slab, spike } from "./AnchorShapes";
 import { ENEMIES } from "../data/enemies";
 import type { GameContext } from "../core/GameContext";
 import { GroundEnemy } from "./Enemy";
-import { ballisticVelocity, clamp, fromToQuat, rand, yawOf } from "../core/MathUtil";
+import { ballisticVelocity, clamp, rand, yawOf } from "../core/MathUtil";
 import { GRAVITY } from "../core/Physics";
 import { spreadDir } from "../combat/Weapon";
 import { sfx } from "../core/Audio";
 
 interface AntTemplates {
   thorax: Mesh;
+  thoraxAcc: Mesh;
   head: Mesh;
   abdomen: Mesh;
+  abdomenAcc: Mesh;
   femur: Mesh;
   tibia: Mesh;
   mandible: Mesh;
-  antenna: Mesh;
   eyes: Mesh;
 }
 
 /** 体の大きさの倍率（全長 約10m。人間の約5〜6倍） */
 const S = 1.6;
-const FEMUR_L = 1.5 * S;
-const TIBIA_L = 2.0 * S;
+const FEMUR_L = 1.7 * S;
+const TIBIA_L = 2.3 * S;
 const cache = new WeakMap<Scene, AntTemplates>();
-
-/** 中心からずらした楕円体などを作り、変形を頂点に焼き込む */
-function bake(m: Mesh, scale: Vector3, pos: Vector3, rot?: Vector3) {
-  m.scaling.copyFrom(scale);
-  m.position.copyFrom(pos);
-  if (rot) m.rotation.copyFrom(rot);
-  m.bakeCurrentTransformIntoVertices();
-  return m;
-}
 
 /** +X 方向へ伸びる先細りの脚パーツ */
 export function limb(scene: Scene, name: string, len: number, d0: number, d1: number) {
   const c = MeshBuilder.CreateCylinder(name, { height: len, diameterTop: d1, diameterBottom: d0, tessellation: 8 }, scene);
-  // 円柱は Y 軸方向。+X 方向に倒して、根元を原点へ
-  return bake(c, new Vector3(1, 1, 1), new Vector3(len / 2, 0, 0), new Vector3(0, 0, -Math.PI / 2));
+  return bakeT(c, new Vector3(len / 2, 0, 0), new Vector3(0, 0, -Math.PI / 2));
 }
 
 export function hideTemplate(m: Mesh) {
@@ -57,87 +49,82 @@ export function hideTemplate(m: Mesh) {
   m.alwaysSelectAsActiveMesh = true;
 }
 
-// カーソル板の向き: rot.x = +π/2 で先端が前（+Z）、-π/2 で後ろ（-Z）。rot.z を足すと縦に立つ
-const FWD = Math.PI / 2;
-const BACK = -Math.PI / 2;
-
-/**
- * 体軸（+Z）のまわりに放射状に板を並べた「ロゼット」。
- * 板の根元は体軸付近、先端は外側へ広がり、tilt だけ前後に傾く（正で後ろへ反る）。
- * @param from,to 並べる角度の範囲（ラジアン。0 = 右、π/2 = 上）
+/*
+ * 造形（アンカー大型級・甲殻型）:
+ *  蟻をそのまま写さず、ラフ画の敵のように「面取りした分厚い装甲板」を重ねたゴツい体にする。
+ *  ・胸部: 多面体の芯の上に、前から後ろへ重なる3枚の背甲と、左右に張り出す肩甲
+ *  ・頭部: くさび形の重い頭。正面中央に赤く光る小さな眼が縦に並ぶ。下に鎌状の大顎
+ *  ・腹部: 後ろへ下がる3つの体節。先端に酸の噴射口
+ *  ・脚: 4本。分厚い腿と、三日月形の鎌のような脛で地面に突き立つ
  */
-function rosette(scene: Scene, n: number, size: number, thick: number, tilt: number, center: Vector3, from = 0, to = Math.PI * 2, full = true): Mesh[] {
-  const out: Mesh[] = [];
-  for (let k = 0; k < n; k++) {
-    const a = full ? from + ((to - from) * k) / n : from + ((to - from) * k) / Math.max(1, n - 1);
-    const m = cursorPlate(scene, "ros", size, thick);
-    // 先端(+Y)を根元から size*0.35 だけ外へ → 板を縦(YZ面)に → 後ろへ反らす → 体軸まわりに回す
-    const mat = Matrix.Translation(0, size * 0.35, 0)
-      .multiply(Matrix.RotationY(Math.PI / 2))
-      .multiply(Matrix.RotationX(-tilt))
-      .multiply(Matrix.RotationZ(a - Math.PI / 2))
-      .multiply(Matrix.Translation(center.x, center.y, center.z));
-    m.bakeTransformIntoVertices(mat);
-    out.push(m);
-  }
-  return out;
-}
-
 function templates(scene: Scene): AntTemplates {
   const c = cache.get(scene);
   if (c) return c;
-  // 黒曜石のような外殻＋赤みがかった襟飾り＋赤く光る眼
-  const shell = shellMaterial(scene, "antShell", new Color3(0.035, 0.032, 0.04), 0.7, 0.22);
-  const accent = shellMaterial(scene, "antAccent", new Color3(0.22, 0.03, 0.03), 0.6, 0.3);
+  // 黒曜石のような外殻＋赤い装甲縁＋赤く光る眼
+  const shell = shellMaterial(scene, "antShell", new Color3(0.04, 0.036, 0.045), 0.65, 0.3);
+  const accent = shellMaterial(scene, "antAccent", new Color3(0.26, 0.035, 0.03), 0.5, 0.35);
   const glow = glowMaterial(scene, "antGlow", new Color3(3.2, 0.25, 0.12));
   const V = (x: number, y: number, z: number) => new Vector3(x * S, y * S, z * S);
-  const plate = (size: number, thick: number, pos: Vector3, rot: Vector3) =>
-    bakeT(cursorPlate(scene, "pl", size * S, thick * S), pos, rot);
+  const R = (x: number, y: number, z: number) => new Vector3(x, y, z);
+  const sl = (x: number, y: number, z: number, p: Vector3, r = R(0, 0, 0)) => slab(scene, "sl", x * S, y * S, z * S, p, r);
 
-  // 胸部: 体軸のまわりに板を放射状に（立体的な胴）
   const thorax = merge("antThorax", [
-    plate(2.0, 0.3, V(0, 0, 0.1), new Vector3(FWD, 0, 0)),
-    plate(1.6, 0.25, V(0, 0, 0), new Vector3(FWD, 0, Math.PI / 2)),
-    ...rosette(scene, 6, 1.3 * S, 0.18 * S, 0.45, V(0, 0, -0.1)),
+    gem(scene, "core", 3, 1.7 * S, 1.2 * S, 1.9 * S, V(0, 0, 0)),
+    // 背甲（前から後ろへ重なる）
+    sl(1.9, 0.55, 1.0, V(0, 0.55, 0.45), R(-0.35, 0, 0)),
+    sl(2.1, 0.6, 1.0, V(0, 0.7, -0.05), R(-0.1, 0, 0)),
+    sl(1.9, 0.55, 0.9, V(0, 0.6, -0.55), R(0.25, 0, 0)),
+    // 腹側
+    sl(1.3, 0.4, 1.6, V(0, -0.5, 0)),
   ]);
-  // 頭部: 前を向いた本体、トリケラトプスのような角3本と、後ろへ広がる襟飾り
-  const headCore = [
-    plate(1.6, 0.35, V(0, 0, 0.55), new Vector3(FWD, 0, 0)),
-    plate(1.2, 0.25, V(0, 0.1, 0.45), new Vector3(FWD, 0, Math.PI / 2)),
-    // 角（前上方へ）
-    plate(1.1, 0.14, V(0.35, 0.45, 0.9), new Vector3(FWD - 0.5, 0.25, 0)),
-    plate(1.1, 0.14, V(-0.35, 0.45, 0.9), new Vector3(FWD - 0.5, -0.25, 0)),
-    plate(0.8, 0.14, V(0, 0.15, 1.25), new Vector3(FWD - 0.2, 0, Math.PI / 2)),
-  ];
-  const frill = merge("antFrill", rosette(scene, 9, 1.9 * S, 0.12 * S, 1.05, V(0, 0.25, 0.1), -0.7, Math.PI + 0.7, false));
-  frill.material = accent;
-  const headShell = merge("antHeadShell", headCore);
-  headShell.material = shell;
-  const head = Mesh.MergeMeshes([headShell, frill], true, true, undefined, false, true)!;
-  head.name = "antHead";
-  // 腹部（尾）: 後ろ向きの芯と、大きく広がる放射状の板
-  const abShell = merge("antAbShell", [
-    plate(3.2, 0.4, V(0, 0.2, -1.6), new Vector3(BACK, 0, 0)),
-    plate(2.6, 0.35, V(0, 0.3, -1.5), new Vector3(BACK, 0, Math.PI / 2)),
-    ...rosette(scene, 8, 2.0 * S, 0.2 * S, 0.9, V(0, 0.25, -1.2)),
+  // 肩甲: 左右に大きく張り出す板（ラフ画の上部の塊）
+  const thoraxAcc = merge("antThoraxAcc", [
+    sl(1.3, 0.45, 1.3, V(1.05, 0.55, 0.2), R(0, 0.2, -0.55)),
+    sl(1.3, 0.45, 1.3, V(-1.05, 0.55, 0.2), R(0, -0.2, 0.55)),
+    spike(scene, "sp", 1.1 * S, 0.5 * S, 0.25 * S, V(0, 0.95, 0.1), R(0, Math.PI / 2, Math.PI / 2 - 0.5)),
   ]);
-  abShell.material = shell;
-  const abFins = merge("antAbFins", rosette(scene, 6, 1.5 * S, 0.12 * S, 1.25, V(0, 0.25, -2.4), Math.PI / 6, Math.PI * 2 + Math.PI / 6));
-  abFins.material = accent;
-  const abdomen = Mesh.MergeMeshes([abShell, abFins], true, true, undefined, false, true)!;
-  abdomen.name = "antAbdomen";
-  const femur = shard(scene, "antFemur", FEMUR_L, 0.4 * S, 0.25 * S);
-  const tibia = shard(scene, "antTibia", TIBIA_L, 0.3 * S, 0.04 * S);
-  const mandible = plate(0.9, 0.15, V(0, 0, 0.4), new Vector3(FWD, 0, 0));
-  mandible.name = "antMand";
-  const antenna = bakeT(shard(scene, "antAnt", 1.7 * S, 0.1 * S, 0.02 * S), Vector3.Zero(), new Vector3(0, -Math.PI / 2, 0));
+  const head = merge("antHead", [
+    // くさび形の頭: 上の重い装甲と、前へ突き出す額
+    sl(1.6, 0.8, 1.3, V(0, 0, 0.55)),
+    sl(1.75, 0.5, 1.2, V(0, 0.42, 0.65), R(0.3, 0, 0)),
+    sl(1.1, 0.45, 0.9, V(0, 0.05, 1.2), R(0.5, 0, 0)),
+    sl(1.2, 0.35, 0.9, V(0, -0.38, 0.85), R(-0.2, 0, 0)),
+    // 頬の装甲
+    sl(0.5, 0.8, 1.0, V(0.78, -0.05, 0.6), R(0, 0.25, 0.2)),
+    sl(0.5, 0.8, 1.0, V(-0.78, -0.05, 0.6), R(0, -0.25, -0.2)),
+  ]);
   const eyes = merge("antEyes", [
-    plate(0.45, 0.12, V(0.42, 0.2, 0.75), new Vector3(FWD, 0, 0.4)),
-    plate(0.45, 0.12, V(-0.42, 0.2, 0.75), new Vector3(FWD, 0, -0.4)),
+    gem(scene, "e", 1, 0.26 * S, 0.22 * S, 0.2 * S, V(0, 0.2, 1.42)),
+    gem(scene, "e", 1, 0.18 * S, 0.15 * S, 0.15 * S, V(0, -0.02, 1.48)),
+    gem(scene, "e", 1, 0.14 * S, 0.12 * S, 0.12 * S, V(0.28, 0.12, 1.35)),
+    gem(scene, "e", 1, 0.14 * S, 0.12 * S, 0.12 * S, V(-0.28, 0.12, 1.35)),
   ]);
-  const t: AntTemplates = { thorax, head, abdomen, femur, tibia, mandible, antenna, eyes };
+  // 大顎: 内側へ曲がる小さな鎌
+  const mandible = bakeT(crescent(scene, "antMand", 1.0 * S, 0.35 * S, 0.22 * S, 0.3), Vector3.Zero(), R(-Math.PI / 2, 0, 0));
+  const abdomen = merge("antAbdomen", [
+    sl(1.9, 1.35, 1.4, V(0, 0.1, -0.6), R(0.15, 0, 0)),
+    sl(1.6, 1.15, 1.3, V(0, -0.05, -1.6), R(0.35, 0, 0)),
+    sl(1.2, 0.9, 1.2, V(0, -0.35, -2.45), R(0.6, 0, 0)),
+    sl(0.7, 0.6, 0.8, V(0, -0.75, -3.0), R(0.9, 0, 0)),
+  ]);
+  // 体節ごとの背中のとげと、噴射口まわりの赤い縁
+  const abdomenAcc = merge("antAbdomenAcc", [
+    spike(scene, "sp", 0.9 * S, 0.5 * S, 0.2 * S, V(0, 0.75, -0.6), R(0, Math.PI / 2, Math.PI / 2 + 0.6)),
+    spike(scene, "sp", 0.8 * S, 0.45 * S, 0.2 * S, V(0, 0.55, -1.6), R(0, Math.PI / 2, Math.PI / 2 + 0.9)),
+    spike(scene, "sp", 0.6 * S, 0.4 * S, 0.18 * S, V(0, 0.15, -2.45), R(0, Math.PI / 2, Math.PI / 2 + 1.2)),
+    sl(0.95, 0.25, 0.95, V(0, -0.95, -3.15), R(0.9, 0, 0)),
+  ]);
+  // 腿: 分厚い装甲の塊（+X 方向へ伸びる）
+  const femur = merge("antFemur", [
+    slab(scene, "f", FEMUR_L * 1.05, 0.65 * S, 0.7 * S, new Vector3(FEMUR_L / 2, 0, 0)),
+    spike(scene, "sp", 0.7 * S, 0.35 * S, 0.2 * S, new Vector3(FEMUR_L * 0.75, 0.25 * S, 0), R(0, 0, 0.9)),
+  ]);
+  // 脛: 三日月形の鎌
+  const tibia = crescent(scene, "antTibia", TIBIA_L, 0.75 * S, 0.4 * S, 0.22);
+  tibia.name = "antTibia";
+  const t: AntTemplates = { thorax, thoraxAcc, head, abdomen, abdomenAcc, femur, tibia, mandible, eyes };
   for (const m of Object.values(t)) {
-    if (m !== head && m !== abdomen) m.material = m === eyes ? glow : shell;
+    m.material = m === eyes ? glow : m === thoraxAcc || m === abdomenAcc || m === mandible ? accent : shell;
     hideTemplate(m);
   }
   cache.set(scene, t);
@@ -174,6 +161,7 @@ export class Ant extends GroundEnemy {
   private wanderWait = rand(0, 3);
   private repositionT = 0;
   private abdomenCurl = 0;
+  private mandibles: InstancedMesh[] = [];
 
   constructor(ctx: GameContext, pos: Vector3, group: number) {
     super(ENEMIES.ant, ctx, pos, group);
@@ -186,24 +174,26 @@ export class Ant extends GroundEnemy {
       i.isPickable = false;
       return i;
     };
-    this.thorax = inst(T.thorax, this.root, new Vector3(0, 1.2 * S, 0));
+    this.thorax = inst(T.thorax, this.root, new Vector3(0, 1.45 * S, 0));
+    inst(T.thoraxAcc, this.thorax, Vector3.Zero());
     const P = (x: number, y: number, z: number) => new Vector3(x * S, y * S, z * S);
-    this.head = inst(T.head, this.thorax, P(0, 0.15, 0.85));
+    this.head = inst(T.head, this.thorax, P(0, 0.1, 0.8));
     inst(T.eyes, this.head, Vector3.Zero());
-    this.abdomen = inst(T.abdomen, this.thorax, P(0, 0.05, -0.85));
+    this.abdomen = inst(T.abdomen, this.thorax, P(0, 0.1, -0.85));
+    inst(T.abdomenAcc, this.abdomen, Vector3.Zero());
     for (const sx of [-1, 1]) {
-      const m = inst(T.mandible, this.head, P(sx * 0.25, -0.2, 1.05));
-      m.rotationQuaternion = Quaternion.RotationYawPitchRoll(-sx * 0.35, 0.2, 0);
-      const a = inst(T.antenna, this.head, P(sx * 0.3, 0.4, 0.9));
-      a.rotationQuaternion = Quaternion.RotationYawPitchRoll(sx * 0.5, -0.7, 0);
+      const m = inst(T.mandible, this.head, P(sx * 0.45, -0.45, 1.1));
+      // 鎌の先が前方の内側を向くように
+      m.rotationQuaternion = Quaternion.RotationYawPitchRoll(-Math.PI / 2 - sx * 1.05, 0.25, sx > 0 ? 0 : Math.PI);
+      this.mandibles.push(m);
     }
-    const zs = [0.5, 0.0, -0.5];
-    const zf = [0.6, 0.05, -0.55];
+    // 4本脚。対角の脚が同時に動く（速歩）
+    const zs = [0.45, -0.45];
+    const zf = [0.75, -0.7];
     for (const sx of [-1, 1]) {
-      for (let i = 0; i < 3; i++) {
-        const femur = inst(T.femur, this.thorax, P(sx * 0.5, -0.2, zs[i]));
-        const tibia = inst(T.tibia, femur, new Vector3(FEMUR_L, 0, 0));
-        // 三脚歩行: 左前・右中・左後 と 右前・左中・右後 が交互に動く
+      for (let i = 0; i < 2; i++) {
+        const femur = inst(T.femur, this.thorax, P(sx * 0.85, 0.1, zs[i]));
+        const tibia = inst(T.tibia, femur, new Vector3(FEMUR_L * 0.95, 0, 0));
         const phase = (i + (sx > 0 ? 1 : 0)) % 2 === 0 ? 0 : Math.PI;
         this.legs.push({ femur, tibia, side: sx, zf: zf[i], phase });
       }
@@ -212,18 +202,18 @@ export class Ant extends GroundEnemy {
     this.position.y = ctx.city.heightAt(pos.x, pos.z);
 
     this.hitSpheres = [
-      { local: P(0, 1.2, 0), r: 1.1 * S, world: new Vector3(), mult: 1 },
-      { local: P(0, 1.35, 1.5), r: 0.85 * S, world: new Vector3(), mult: 1.5 },
-      { local: P(0, 1.5, -2.3), r: 1.4 * S, world: new Vector3(), mult: 0.9 },
+      { local: P(0, 1.55, 0), r: 1.25 * S, world: new Vector3(), mult: 1 },
+      { local: P(0, 1.6, 1.6), r: 0.9 * S, world: new Vector3(), mult: 1.5 },
+      { local: P(0, 1.4, -2.3), r: 1.3 * S, world: new Vector3(), mult: 0.9 },
     ];
     const V = (x: number, y: number, z: number) => new Vector3(x, y, z);
     this.rig = [
-      { node: this.thorax, parent: -1, size: P(1.4, 0.8, 1.8), center: V(0, 0, 0), mass: 250 },
-      { node: this.head, parent: 0, size: P(1.2, 0.8, 1.2), center: P(0, 0.05, 0.55), mass: 90, swing: 0.6 },
-      { node: this.abdomen, parent: 0, size: P(1.8, 1.4, 2.6), center: P(0, 0.25, -1.5), mass: 280, swing: 0.6 },
+      { node: this.thorax, parent: -1, size: P(2.0, 1.4, 2.0), center: P(0, 0.15, 0), mass: 300 },
+      { node: this.head, parent: 0, size: P(1.6, 1.1, 1.5), center: P(0, 0.05, 0.7), mass: 110, swing: 0.6 },
+      { node: this.abdomen, parent: 0, size: P(1.7, 1.2, 2.8), center: P(0, -0.2, -1.6), mass: 280, swing: 0.6 },
       ...this.legs.flatMap((l, i) => [
-        { node: l.femur, parent: 0, size: V(FEMUR_L, 0.35 * S, 0.35 * S), center: V(FEMUR_L / 2, 0, 0), mass: 20, swing: 0.9 },
-        { node: l.tibia, parent: 3 + i * 2, size: V(TIBIA_L, 0.25 * S, 0.25 * S), center: V(TIBIA_L / 2, 0, 0), mass: 12, swing: 1.0 },
+        { node: l.femur, parent: 0, size: V(FEMUR_L, 0.6 * S, 0.6 * S), center: V(FEMUR_L / 2, 0, 0), mass: 30, swing: 0.9 },
+        { node: l.tibia, parent: 3 + i * 2, size: V(TIBIA_L * 0.9, 0.5 * S, 0.35 * S), center: V(TIBIA_L * 0.45, 0.15 * S, 0), mass: 18, swing: 1.0 },
       ]),
     ];
     this.animateLegs(0, 0);
@@ -235,6 +225,7 @@ export class Ant extends GroundEnemy {
   }
 
   update(dt: number) {
+    if (this.updateCurled(dt)) return;
     this.t += dt;
     this.stagger = Math.max(0, this.stagger - dt);
     this.biteCd = Math.max(0, this.biteCd - dt);
@@ -399,39 +390,43 @@ export class Ant extends GroundEnemy {
 
   private animateLegs(dt: number, speed: number) {
     const moving = Math.min(1, speed / 4);
-    this.gait += dt * (2 + speed * 1.1);
-    const thoraxInvTmp = new Quaternion();
+    this.gait += dt * (2.2 + speed * 1.0);
     for (const l of this.legs) {
       const ph = this.gait + l.phase;
-      const swing = Math.sin(ph) * 0.45 * moving;
-      const lift = Math.max(0, Math.cos(ph)) * 0.35 * moving;
-      const fd = new Vector3(l.side * 0.75, 0.35 + lift, l.zf + swing);
-      const fq = fromToQuat(Vector3.Right(), fd, l.femur.rotationQuaternion!);
-      // 脛は胴体空間で下向き → 腿ローカルへ変換
-      const td = new Vector3(l.side * 0.42, -1, l.zf * 0.5 + swing * 0.6);
-      Quaternion.InverseToRef(fq, thoraxInvTmp);
-      const local = td.rotateByQuaternionToRef(thoraxInvTmp, new Vector3());
-      fromToQuat(Vector3.Right(), local, l.tibia.rotationQuaternion!);
+      const swing = Math.sin(ph) * 0.5 * moving;
+      const lift = Math.max(0, Math.cos(ph)) * 0.45 * moving;
+      // 腿は外側へ高く張り出し、鎌は外へふくらみながら地面へ突き立つ
+      const fd = new Vector3(l.side * 0.8, 0.55 + lift, l.zf + swing);
+      const td = new Vector3(l.side * 0.3, -1, l.zf * 0.35 + swing * 0.5);
+      poseLeg(l.femur, l.tibia, fd, td, l.side);
     }
+    // 大顎をゆっくり開閉（噛みつきでは大きく）
+    const open = this.state === "bite" ? 0.5 : 0.12 + Math.sin(this.t * 3.1) * 0.08;
+    this.mandibles.forEach((m, i) => {
+      const sx = i === 0 ? -1 : 1;
+      Quaternion.RotationYawPitchRollToRef(-Math.PI / 2 - sx * (1.05 - open), 0.25, sx > 0 ? 0 : Math.PI, m.rotationQuaternion!);
+    });
   }
 
-  /** 死亡ポーズ: 脚を縮めて腹側へ折りたたみ、頭と尾を反らせる（虫の死骸のように） */
+  /** 死亡ポーズ: 虫の死骸のように脚を腹側へ強く折りたたみ、体を丸める */
   protected deathPose() {
-    const inv = new Quaternion();
     for (const l of this.legs) {
-      const fq = fromToQuat(Vector3.Right(), new Vector3(l.side * 0.8, -0.05, l.zf * 0.35), l.femur.rotationQuaternion!);
-      Quaternion.InverseToRef(fq, inv);
-      const td = new Vector3(-l.side * 0.75, 0.35, l.zf * 0.15).rotateByQuaternionToRef(inv, new Vector3());
-      fromToQuat(Vector3.Right(), td, l.tibia.rotationQuaternion!);
+      const fd = new Vector3(l.side * 0.45, -0.75, l.zf * 0.3);
+      const td = new Vector3(-l.side * 0.85, 0.45, -l.zf * 0.25);
+      poseLeg(l.femur, l.tibia, fd, td, l.side, new Vector3(0, -1, 0));
     }
-    this.head.rotationQuaternion = Quaternion.RotationYawPitchRoll(rand(-0.3, 0.3), -0.45, rand(-0.2, 0.2));
-    this.abdomen.rotationQuaternion = Quaternion.RotationYawPitchRoll(rand(-0.2, 0.2), -0.35, 0);
+    this.head.rotationQuaternion = Quaternion.RotationYawPitchRoll(Math.sin(this.id * 7.1) * 0.15, 0.55, Math.sin(this.id * 3.7) * 0.1);
+    this.abdomen.rotationQuaternion = Quaternion.RotationYawPitchRoll(Math.sin(this.id * 5.3) * 0.1, -0.5, 0);
+    this.mandibles.forEach((m, i) => {
+      const sx = i === 0 ? -1 : 1;
+      m.rotationQuaternion = Quaternion.RotationYawPitchRoll(-Math.PI / 2 - sx * 1.35, 0.25, sx > 0 ? 0 : Math.PI);
+    });
   }
 
   protected onDeath(dir: Vector3, force: number) {
     sfx.squish(this.position);
     // 瞬間的に死亡ポーズで固まり、軽く跳ねる（爆風なら大きく飛ぶ）
-    const v = new Vector3(dir.x, 0, dir.z).scale(force * 0.2).add(new Vector3(0, 1.5 + force * 0.1, 0));
-    this.rigidize(v, 0.8 + force * 0.04);
+    const v = new Vector3(dir.x, 0, dir.z).scale(force * 0.2).add(new Vector3(0, 3.2 + force * 0.1, 0));
+    this.rigidize(v, 0.5 + force * 0.04, true);
   }
 }

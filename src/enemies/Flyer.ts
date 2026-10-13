@@ -124,6 +124,11 @@ export class FlyerSquad {
 
 export class Flyer extends Enemy {
   squad: FlyerSquad;
+  /**
+   * 戦艦級（スポーンシップ）の凹みに格納中・発進中は、戦艦級がこの位置と向きを毎フレーム指定する。
+   * null になると通常の編隊飛行へ移る。
+   */
+  dock: { pos: Vector3; heading: Vector3 } | null = null;
   slotIndex = 0;
   heading = new Vector3(0, 0, 1);
   speed = 0;
@@ -190,7 +195,14 @@ export class Flyer extends Enemy {
     this.t += dt;
     this.gunCd -= dt;
     this.bombCd -= dt;
-    if (this.isLeader) this.leaderBrain(dt);
+    if (this.dock) {
+      // 戦艦級に運ばれている（姿勢計算のために速度だけ求める）
+      const prev = this.position.clone();
+      this.position.copyFrom(this.dock.pos);
+      if (dt > 0) this.vel.copyFrom(this.position.subtract(prev).scaleInPlace(1 / dt));
+      this.heading.copyFrom(this.dock.heading);
+      this.speed = this.vel.length();
+    } else if (this.isLeader) this.leaderBrain(dt);
     else this.followLeader(dt);
 
     // 姿勢: 機体の「上」は（旋回の加速度 + 重力に逆らう向き）。宙返りの頂点では自然に裏返る。

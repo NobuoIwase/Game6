@@ -28,6 +28,7 @@ import type { Input } from "./Input";
 import type { DifficultyDef, MissionDef } from "../data/missions";
 import type { WeaponDef } from "../data/weapons";
 import { corpseBodyOf, CorpseBody, enableHavok, Ragdoll, RigPart } from "./Physics";
+import { buildNationStake } from "../world/Stake";
 import { City } from "../world/City";
 import { createCityMaterials } from "../world/Materials";
 import { Effects } from "../combat/Effects";
@@ -157,10 +158,13 @@ export class Game implements GameContext {
     });
     scene.environmentTexture = env;
     scene.environmentIntensity = 0.85;
-    const dome = new PhotoDome("sky", "assets/hdri/sky_4k.jpg", { resolution: 48, size: Math.min(2800, cam.maxZ * 1.8) }, scene);
+    const domeSize = Math.min(2800, cam.maxZ * 1.8);
+    const dome = new PhotoDome("sky", "assets/hdri/sky_4k.jpg", { resolution: 48, size: domeSize }, scene);
     dome.mesh.applyFog = false;
     dome.mesh.infiniteDistance = true;
     dome.mesh.isPickable = false;
+    // 遠景: 地面に突き刺さった国家級アンカー（空のドームの内側に置く）
+    buildNationStake(scene, Math.min(domeSize / 2, cam.maxZ) * 0.8, scene.fogColor);
 
     const sun = new DirectionalLight("sun", new Vector3(-0.42, -0.78, 0.46).normalize(), scene);
     sun.intensity = 3.2;
@@ -207,12 +211,12 @@ export class Game implements GameContext {
     };
     this.enemies.onCarrier = () =>
       this.opts.hud.radio([
-        { who: "オペレーター", text: "上空に輸送船！ 巨大生物を投下するつもりです！" },
-        { who: "本部", text: "装甲は厚い。ハッチが開いた瞬間に、内部を狙い撃て！", delay: 3 },
+        { who: "オペレーター", text: "上空に戦艦級！ とげのあいだに飛行型を抱えています！" },
+        { who: "本部", text: "あれも生き物だ。外殻は硬いが、上下の呼吸孔が開いた瞬間を狙え！", delay: 3.5 },
       ]);
     let hatchMsg = 0;
     this.enemies.carrierOpened = () => {
-      if (hatchMsg++ < 2) this.opts.hud.radio([{ who: "隊長", text: "ハッチが開いたぞ！ 中を撃て！" }]);
+      if (hatchMsg++ < 2) this.opts.hud.radio([{ who: "隊長", text: "呼吸孔が開いたぞ！ 撃て！" }]);
     };
     this.enemies.onFirstAlert = () => this.opts.hud.radio([{ who: "本部", text: "敵が動き出したぞ！ 迎撃せよ！" }]);
     this.combat = this.makeCombatContext();

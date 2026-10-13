@@ -126,12 +126,13 @@ export class Player {
     const speed = this.dashing ? 12 : 6.2 * zoomSlow;
 
     if (this.state === "roll") {
+      // 飛び込み前転（踏み切り → 飛び込み → 前転 → 起き上がり）
       this.rollT += dt;
-      const dur = 0.55;
-      const k = this.rollT / dur;
-      const sp = 13 * (1 - k * 0.6);
+      const dur = 0.78;
+      const k = Math.min(1, this.rollT / dur);
+      const sp = k < 0.16 ? 8 : k < 0.36 ? 13 : k < 0.78 ? 10 : 10 - ((k - 0.78) / 0.22) * 8;
       this.velH.copyFrom(this.rollDir).scaleInPlace(sp);
-      this.soldier.setRoll(k * Math.PI * 2);
+      this.soldier.animateRoll(k);
       this.soldier.root.rotationQuaternion = null;
       this.soldier.root.rotation.y = Math.atan2(this.rollDir.x, this.rollDir.z);
       if (k >= 1) {
@@ -180,7 +181,8 @@ export class Player {
     // ---- アニメーション ----
     const localF = Vector3.Dot(this.velH, fwd);
     const localR = Vector3.Dot(this.velH, right);
-    this.soldier.animate(dt, localF, localR, aimPitch, this.grounded, this.recoil, this.weapon.reloading || this.switchT > 0 || this.dashing);
+    if (this.state === "normal")
+      this.soldier.animate(dt, localF, localR, aimPitch, this.grounded, this.recoil, this.weapon.reloading || this.switchT > 0, this.dashing);
   }
 
   private switchWeapon(i: number) {

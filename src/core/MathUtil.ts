@@ -1,7 +1,7 @@
 // 共通の数学ユーティリティ
 // Babylon.js は左手系: +Z が前、+Y が上、+X が右。
 // RotationYawPitchRoll(yaw, pitch, roll): yaw+ は +Z→+X、pitch+ は +Z→-Y（下向き）、roll+ は +X→+Y。
-import { Quaternion, Vector3 } from "@babylonjs/core";
+import { Matrix, Quaternion, Vector3 } from "@babylonjs/core";
 
 export const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -128,4 +128,14 @@ export function ballisticVelocity(from: Vector3, to: Vector3, speed: number, gra
   }
   const ang = Math.atan2(v2 - Math.sqrt(disc), g * h);
   return dirH.scale(Math.cos(ang) * speed).add(new Vector3(0, Math.sin(ang) * speed, 0));
+}
+
+/** 前方向（+Z）と上方向（+Y）から回転を作る（左手系） */
+export function basisQuat(forward: Vector3, up: Vector3, out = new Quaternion()): Quaternion {
+  const z = forward.normalizeToNew();
+  const x = Vector3.Cross(up, z).normalize();
+  const y = Vector3.Cross(z, x);
+  const m = Matrix.Identity();
+  Matrix.FromXYZAxesToRef(x, y, z, m);
+  return Quaternion.FromRotationMatrixToRef(m, out);
 }

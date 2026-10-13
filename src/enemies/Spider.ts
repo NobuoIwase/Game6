@@ -6,11 +6,12 @@
 //   一定以上でプレイヤーは糸に絡め取られて倒れる（ラグドール化）
 // ============================================================================
 import { Color3, InstancedMesh, Mesh, Quaternion, Scene, TransformNode, Vector3 } from "@babylonjs/core";
-import { bakeT, cursorPlate, glowMaterial, merge, shard, shellMaterial } from "./AlienShapes";
+import { glowMaterial, merge, shellMaterial } from "./AlienShapes";
+import { crescent, gem, poseLeg, slab, spike } from "./AnchorShapes";
 import { ENEMIES } from "../data/enemies";
 import type { GameContext } from "../core/GameContext";
 import { GroundEnemy } from "./Enemy";
-import { clamp, fromToQuat, rand, yawOf } from "../core/MathUtil";
+import { clamp, rand, yawOf } from "../core/MathUtil";
 import { GRAVITY } from "../core/Physics";
 import { spreadDir } from "../combat/Weapon";
 import { sfx } from "../core/Audio";
@@ -18,6 +19,7 @@ import { hideTemplate } from "./Ant";
 
 interface SpiderTemplates {
   body: Mesh;
+  crown: Mesh;
   abdomen: Mesh;
   femur: Mesh;
   tibia: Mesh;
@@ -26,44 +28,64 @@ interface SpiderTemplates {
 
 /** 体の大きさの倍率（脚を広げて 約14m） */
 const S = 1.6;
-const FEMUR_L = 2.3 * S;
+const FEMUR_L = 2.2 * S;
 const TIBIA_L = 3.0 * S;
 const cache = new WeakMap<Scene, SpiderTemplates>();
-const FWD = Math.PI / 2;
-const BACK = -Math.PI / 2;
 
+/*
+ * 造形（アンカー大型級・跳躍型）:
+ *  蜘蛛をそのまま写さず、平たく幅広い甲羅の上に放射状のとげの冠を持つ体にする。
+ *  ・6本の長い鎌状の脚を、膝を胴より高く上げて構える（ラフ画の大きな三日月の脚）
+ *  ・正面に紫に光る小さな眼の群れ
+ *  ・後ろに分厚い装甲板を重ねた腹部（糸の射出口）
+ */
 function templates(scene: Scene): SpiderTemplates {
   const c = cache.get(scene);
   if (c) return c;
-  // 骨のように白っぽい外殻＋紫に光る眼（蟻型とは逆の配色）
-  const shell = shellMaterial(scene, "spiderShell", new Color3(0.72, 0.68, 0.6), 0.15, 0.5);
+  // 骨のように白っぽい外殻＋灰色の装甲＋紫に光る眼（甲殻型とは逆の配色）
+  const shell = shellMaterial(scene, "spiderShell", new Color3(0.7, 0.66, 0.58), 0.12, 0.5);
+  const dark = shellMaterial(scene, "spiderDark", new Color3(0.16, 0.15, 0.17), 0.4, 0.4);
   const glow = glowMaterial(scene, "spiderGlow", new Color3(1.6, 0.3, 3.2));
   const V = (x: number, y: number, z: number) => new Vector3(x * S, y * S, z * S);
-  const plate = (size: number, thick: number, pos: Vector3, rot: Vector3) =>
-    bakeT(cursorPlate(scene, "pl", size * S, thick * S), pos, rot);
-  // 頭胸部: 3枚の板を放射状に（三角形の星）
+  const R = (x: number, y: number, z: number) => new Vector3(x, y, z);
+  const sl = (x: number, y: number, z: number, p: Vector3, r = R(0, 0, 0)) => slab(scene, "sl", x * S, y * S, z * S, p, r);
+  // 甲羅: 平たく幅広い面取りの塊を重ねる
   const body = merge("spBody", [
-    plate(1.9, 0.3, V(0, 0, 0.2), new Vector3(FWD, 0, 0)),
-    plate(1.5, 0.25, V(0.3, 0, -0.1), new Vector3(FWD, 2.1, 0)),
-    plate(1.5, 0.25, V(-0.3, 0, -0.1), new Vector3(FWD, -2.1, 0)),
+    sl(2.4, 0.6, 2.0, V(0, 0, 0.1)),
+    sl(1.9, 0.5, 1.6, V(0, 0.35, 0.05), R(-0.1, 0, 0)),
+    sl(1.4, 0.55, 0.8, V(0, 0.05, 1.0), R(0.35, 0, 0)), // 額
+    sl(1.6, 0.35, 1.4, V(0, -0.4, 0.1)),
   ]);
-  // 腹部: 大きな後ろ向きの板を上下に重ね、ふくらみを出す
+  // 背中のとげの冠（後ろ向きに放射状）
+  const crownParts: Mesh[] = [];
+  for (let k = 0; k < 5; k++) {
+    const a = -0.9 + (1.8 * k) / 4;
+    crownParts.push(spike(scene, "cr", 1.3 * S, 0.45 * S, 0.18 * S, V(Math.sin(a) * 0.5, 0.55, -0.1), R(0, Math.PI / 2 + a, Math.PI / 2 - 0.45)));
+  }
+  crownParts.push(sl(1.0, 0.3, 0.5, V(0.95, 0.15, 0.45), R(0, 0.5, -0.4)), sl(1.0, 0.3, 0.5, V(-0.95, 0.15, 0.45), R(0, -0.5, 0.4)));
+  const crown = merge("spCrown", crownParts);
   const abdomen = merge("spAbdomen", [
-    plate(2.8, 0.4, V(0, 0.35, -1.5), new Vector3(BACK - 0.25, 0, 0)),
-    plate(2.4, 0.35, V(0, 0.7, -1.4), new Vector3(BACK - 0.45, 0, 0)),
-    plate(2.2, 0.3, V(0, 0.5, -1.3), new Vector3(BACK - 0.3, 0, Math.PI / 2)),
+    sl(2.1, 1.3, 1.7, V(0, 0.45, -1.2), R(-0.2, 0, 0)),
+    sl(1.8, 1.0, 1.5, V(0, 0.6, -2.1), R(-0.45, 0, 0)),
+    sl(1.2, 0.7, 1.0, V(0, 0.75, -2.8), R(-0.7, 0, 0)),
   ]);
-  const femur = shard(scene, "spFemur", FEMUR_L, 0.34 * S, 0.2 * S);
-  const tibia = shard(scene, "spTibia", TIBIA_L, 0.22 * S, 0.03 * S);
+  const femur = merge("spFemur", [
+    slab(scene, "f", FEMUR_L * 1.05, 0.45 * S, 0.5 * S, new Vector3(FEMUR_L / 2, 0, 0)),
+    spike(scene, "sp", 0.6 * S, 0.3 * S, 0.15 * S, new Vector3(FEMUR_L * 0.85, 0.2 * S, 0), R(0, 0, 1.0)),
+  ]);
+  const tibia = crescent(scene, "spTibia", TIBIA_L, 0.55 * S, 0.3 * S, 0.28);
+  tibia.name = "spTibia";
   const eyes = merge("spEyes", [
-    plate(0.35, 0.1, V(0.22, 0.25, 0.95), new Vector3(FWD, 0, 0.3)),
-    plate(0.35, 0.1, V(-0.22, 0.25, 0.95), new Vector3(FWD, 0, -0.3)),
-    plate(0.25, 0.1, V(0.45, 0.18, 0.75), new Vector3(FWD, 0.6, 0)),
-    plate(0.25, 0.1, V(-0.45, 0.18, 0.75), new Vector3(FWD, -0.6, 0)),
+    gem(scene, "e", 1, 0.22 * S, 0.2 * S, 0.18 * S, V(0.2, 0.25, 1.35)),
+    gem(scene, "e", 1, 0.22 * S, 0.2 * S, 0.18 * S, V(-0.2, 0.25, 1.35)),
+    gem(scene, "e", 1, 0.15 * S, 0.14 * S, 0.14 * S, V(0.45, 0.15, 1.2)),
+    gem(scene, "e", 1, 0.15 * S, 0.14 * S, 0.14 * S, V(-0.45, 0.15, 1.2)),
+    gem(scene, "e", 1, 0.12 * S, 0.11 * S, 0.11 * S, V(0.12, 0.0, 1.42)),
+    gem(scene, "e", 1, 0.12 * S, 0.11 * S, 0.11 * S, V(-0.12, 0.0, 1.42)),
   ]);
-  const t: SpiderTemplates = { body, abdomen, femur, tibia, eyes };
+  const t: SpiderTemplates = { body, crown, abdomen, femur, tibia, eyes };
   for (const m of Object.values(t)) {
-    m.material = m === eyes ? glow : shell;
+    m.material = m === eyes ? glow : m === crown || m === femur ? dark : shell;
     hideTemplate(m);
   }
   cache.set(scene, t);
@@ -108,13 +130,14 @@ export class Spider extends GroundEnemy {
     this.body = inst(T.body, this.root, new Vector3(0, 1.3 * S, 0));
     const P = (x: number, y: number, z: number) => new Vector3(x * S, y * S, z * S);
     inst(T.eyes, this.body, new Vector3(0, 0, 0));
-    this.abdomen = inst(T.abdomen, this.body, P(0, 0.1, -0.7));
-    const zs = [0.6, 0.2, -0.2, -0.6];
-    const zf = [0.9, 0.3, -0.25, -0.8];
+    inst(T.crown, this.body, new Vector3(0, 0, 0));
+    this.abdomen = inst(T.abdomen, this.body, P(0, 0.1, -0.2));
+    const zs = [0.6, 0.0, -0.6];
+    const zf = [0.95, 0.1, -0.85];
     for (const sx of [-1, 1])
-      for (let i = 0; i < 4; i++) {
-        const femur = inst(T.femur, this.body, P(sx * 0.55, 0.1, zs[i]));
-        const tibia = inst(T.tibia, femur, new Vector3(FEMUR_L, 0, 0));
+      for (let i = 0; i < 3; i++) {
+        const femur = inst(T.femur, this.body, P(sx * 1.0, 0.1, zs[i]));
+        const tibia = inst(T.tibia, femur, new Vector3(FEMUR_L * 0.95, 0, 0));
         const phase = (i + (sx > 0 ? 1 : 0)) % 2 === 0 ? 0 : Math.PI;
         this.legs.push({ femur, tibia, side: sx, zf: zf[i], phase });
       }
@@ -125,11 +148,11 @@ export class Spider extends GroundEnemy {
     ];
     const V = (x: number, y: number, z: number) => new Vector3(x, y, z);
     this.rig = [
-      { node: this.body, parent: -1, size: P(1.6, 0.6, 1.7), center: P(0, 0, 0.1), mass: 180 },
-      { node: this.abdomen, parent: 0, size: P(2.0, 1.4, 2.5), center: P(0, 0.45, -1.5), mass: 220, swing: 0.5 },
+      { node: this.body, parent: -1, size: P(2.3, 0.9, 2.2), center: P(0, 0, 0.2), mass: 200 },
+      { node: this.abdomen, parent: 0, size: P(1.9, 1.2, 2.4), center: P(0, 0.6, -1.9), mass: 220, swing: 0.5 },
       ...this.legs.flatMap((l, i) => [
-        { node: l.femur, parent: 0, size: V(FEMUR_L, 0.3 * S, 0.3 * S), center: V(FEMUR_L / 2, 0, 0), mass: 14, swing: 1.0 },
-        { node: l.tibia, parent: 2 + i * 2, size: V(TIBIA_L, 0.2 * S, 0.2 * S), center: V(TIBIA_L / 2, 0, 0), mass: 9, swing: 1.1 },
+        { node: l.femur, parent: 0, size: V(FEMUR_L, 0.45 * S, 0.45 * S), center: V(FEMUR_L / 2, 0, 0), mass: 16, swing: 1.0 },
+        { node: l.tibia, parent: 2 + i * 2, size: V(TIBIA_L * 0.9, 0.4 * S, 0.25 * S), center: V(TIBIA_L * 0.45, 0.15 * S, 0), mass: 10, swing: 1.1 },
       ]),
     ];
     this.applyOrientation(0);
@@ -142,6 +165,7 @@ export class Spider extends GroundEnemy {
   }
 
   update(dt: number) {
+    if (this.updateCurled(dt)) return;
     this.t += dt;
     this.stagger = Math.max(0, this.stagger - dt);
     if (this.updateAir(dt)) {
@@ -258,37 +282,33 @@ export class Spider extends GroundEnemy {
 
   private animateLegs(dt: number, speed: number, air = false) {
     const moving = Math.min(1, speed / 4);
-    this.gait += dt * (3 + speed * 1.4);
-    const inv = new Quaternion();
+    this.gait += dt * (3 + speed * 1.3);
     for (const l of this.legs) {
       const ph = this.gait + l.phase;
-      const swing = Math.sin(ph) * 0.4 * moving;
-      const lift = Math.max(0, Math.cos(ph)) * 0.3 * moving;
-      // 蜘蛛は膝を高く上げる姿勢
-      const fd = air ? new Vector3(l.side * 0.6, 0.6, l.zf * 1.3) : new Vector3(l.side * 0.6, 0.6 + lift, l.zf + swing);
-      const fq = fromToQuat(Vector3.Right(), fd, l.femur.rotationQuaternion!);
-      const td = air ? new Vector3(l.side * 0.5, -0.4, l.zf) : new Vector3(l.side * 0.35, -1, l.zf * 0.5 + swing * 0.5);
-      Quaternion.InverseToRef(fq, inv);
-      fromToQuat(Vector3.Right(), td.rotateByQuaternionToRef(inv, new Vector3()), l.tibia.rotationQuaternion!);
+      const swing = Math.sin(ph) * 0.45 * moving;
+      const lift = Math.max(0, Math.cos(ph)) * 0.35 * moving;
+      // 膝（腿の先）を胴より高く上げ、長い鎌を地面へ突き下ろす姿勢
+      const fd = air ? new Vector3(l.side * 0.6, 0.5, l.zf * 1.3) : new Vector3(l.side * 0.55, 0.75 + lift, l.zf + swing);
+      const td = air ? new Vector3(l.side * 0.6, -0.5, l.zf) : new Vector3(l.side * 0.42, -1, l.zf * 0.45 + swing * 0.5);
+      poseLeg(l.femur, l.tibia, fd, td, l.side);
     }
     this.abdomen.rotationQuaternion = Quaternion.RotationYawPitchRoll(Math.sin(this.t * 1.3) * 0.08, Math.sin(this.t * 2) * 0.05, 0);
   }
 
-  /** 死亡ポーズ: 8本の脚を内側へ丸める */
+  /** 死亡ポーズ: 6本の脚を腹側へ強く丸めて縮こまる（ひっくり返った虫の死骸） */
   protected deathPose() {
-    const inv = new Quaternion();
     for (const l of this.legs) {
-      const fq = fromToQuat(Vector3.Right(), new Vector3(l.side * 0.6, 0.45, l.zf * 0.5), l.femur.rotationQuaternion!);
-      Quaternion.InverseToRef(fq, inv);
-      const td = new Vector3(-l.side * 0.6, -0.35, l.zf * 0.1).rotateByQuaternionToRef(inv, new Vector3());
-      fromToQuat(Vector3.Right(), td, l.tibia.rotationQuaternion!);
+      const fd = new Vector3(l.side * 0.4, -0.7, l.zf * 0.35);
+      const td = new Vector3(-l.side * 0.9, 0.5, -l.zf * 0.2);
+      poseLeg(l.femur, l.tibia, fd, td, l.side, new Vector3(0, -1, 0));
     }
-    this.abdomen.rotationQuaternion = Quaternion.RotationYawPitchRoll(0, 0.25, rand(-0.2, 0.2));
+    this.abdomen.rotationQuaternion = Quaternion.RotationYawPitchRoll(0, -0.4, Math.sin(this.id * 4.1) * 0.15);
   }
 
   protected onDeath(dir: Vector3, force: number) {
     sfx.squish(this.position);
     const v = new Vector3(dir.x, 0, dir.z).scale(force * 0.2).add(new Vector3(0, 1.5 + force * 0.1, 0));
-    this.rigidize(v.add(this.vel.scale(0.3)), 0.8 + force * 0.04);
+    v.y += 1.7;
+    this.rigidize(v.add(this.vel.scale(0.3)), 0.5 + force * 0.04, true);
   }
 }
