@@ -25,7 +25,9 @@ import { sfx } from "../core/Audio";
 export const SHIP_HORNS = 8;
 const HORN_R0 = 10;
 const HORN_LEN = 17;
-const DOCK_R = 16.5;
+/** 格納中の飛行型の中心の半径（機首の先端が とげの付け根の凹み r≒11m に収まる） */
+const DOCK_R = 14.2;
+const DOCK_Y = -1.4;
 const VENT_Y = 4.6;
 
 interface Templates {
@@ -86,11 +88,13 @@ interface DockSlot {
   flyer: Flyer;
   /** 凹みの番号（0..SHIP_HORNS-1） */
   notch: number;
-  stage: "docked" | "drop" | "out" | "around" | "form" | "free";
+  stage: "docked" | "drop" | "cross" | "around" | "form" | "free";
   t: number;
   angle: number;
   pos: Vector3;
   heading: Vector3;
+  /** くぐり抜けを始めた位置 */
+  from?: Vector3;
 }
 
 export class Carrier extends Enemy {
@@ -207,7 +211,7 @@ export class Carrier extends Enemy {
             d.t = 0;
             sfx.collapse(this.position);
           }
-          this.launchCd = 0.4;
+          this.launchCd = 0.8;
         }
         if (this.launchIdx >= this.docks.length && this.docks.every((d) => d.stage === "free" || !d.flyer.alive)) this.setState("breathe");
         break;
@@ -266,26 +270,37 @@ export class Carrier extends Enemy {
       outDir.normalize();
       switch (d.stage) {
         case "docked":
-          this.notchWorld(d.notch, DOCK_R, 0, d.pos);
-          d.heading.copyFrom(outDir);
+          // 機首を内側へ向け、先端をとげのあいだの凹みに差し込んでいる
+          this.notchWorld(d.notch, DOCK_R, DOCK_Y, d.pos);
+          d.heading.copyFrom(outDir).scaleInPlace(-1);
           break;
         case "drop": {
-          // 下へ降りて凹みから外れる
-          const k = Math.min(1, d.t / 1.1);
-          this.notchWorld(d.notch, DOCK_R, -6 * k * k * (3 - 2 * k), d.pos);
-          d.heading.copyFrom(outDir);
+          // ゆっくり真下へ降りて凹みから外れる
+          const k = Math.min(1, d.t / 2.2);
+          this.notchWorld(d.notch, DOCK_R, DOCK_Y - 9 * k * k * (3 - 2 * k), d.pos);
+          d.heading.copyFrom(outDir).scaleInPlace(-1);
           if (k >= 1) {
-            d.stage = "out";
+            d.stage = "cross";
             d.t = 0;
+            d.from = d.pos.clone();
           }
           break;
         }
-        case "out": {
-          // 放射状に外へ離れる（対角線上の仲間とは逆向きに進むのでぶつからない）
-          const k = Math.min(1, d.t / 1.8);
+        case "cross": {
+          // 機首の向きのまま円盤の下をくぐって対岸へ。対角線上の仲間と正面からすれ違うので、
+          // お互いに自分の右側へふくらんで避ける（右側通行）
+          const k = Math.min(1, d.t / 3.4);
           const e = k * k * (3 - 2 * k);
-          this.notchWorld(d.notch, DOCK_R + (R - DOCK_R) * e, -6 - 4 * e, d.pos);
-          d.heading.copyFrom(outDir);
+          const to = this.notchWorld((d.notch + SHIP_HORNS / 2) % SHIP_HORNS, R, -11, tmp).clone();
+          const fwd = to.subtract(d.from!);
+          fwd.y = 0;
+          fwd.normalize();
+          const right = new Vector3(fwd.z, 0, -fwd.x);
+          const prev = d.pos.clone();
+          Vector3.LerpToRef(d.from!, to, e, d.pos);
+          d.pos.addInPlace(right.scale(Math.sin(Math.PI * k) * 8));
+          const v = d.pos.subtract(prev);
+          if (v.lengthSquared() > 1e-6) d.heading.copyFrom(v.normalize());
           if (k >= 1) {
             d.stage = "around";
             d.t = 0;

@@ -37,7 +37,7 @@ const limit = +(args.limit ?? 900); // 1 回のプレイの上限（ゲーム内
 const botOpts = { aimError: args.aim ? +args.aim : undefined, turnRate: args.turn ? +args.turn : undefined };
 
 const exe = process.env.CHROMIUM_PATH || (fs.existsSync("/opt/pw-browsers/chromium") ? "/opt/pw-browsers/chromium" : undefined);
-const server = await createServer({ root, logLevel: "error", server: { port: 0, host: "127.0.0.1" } });
+const server = await createServer({ root, logLevel: "error", server: { port: 0, host: "127.0.0.1", hmr: false, watch: { ignored: ["**/*"] } } }); // 編集中でもページが再読み込みされないように
 await server.listen();
 const url = server.resolvedUrls.local[0];
 const browser = await chromium.launch({

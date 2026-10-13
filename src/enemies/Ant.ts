@@ -354,7 +354,7 @@ export class Ant extends GroundEnemy {
         this.moveSpeed = 0;
         if (this.stateT > 0.25 && this.biteCd <= 0) {
           if (dist < this.def.radius + 4) {
-            player.takeDamage(18 * this.ctx.difficulty.enemyDamage, this.position, 3, "bite");
+            player.takeDamage(12 * this.ctx.difficulty.enemyDamage, this.position, 3, "bite");
             sfx.squish(this.position);
           }
           this.biteCd = 1.4;
