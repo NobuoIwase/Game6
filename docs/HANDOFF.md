@@ -186,6 +186,15 @@ v0.4.0 で追加確認: 陸戦兵の各ポーズ（待機・走り4位相・ダ�
 テストプレイ用の公開先: claude.ai のアーティファクト（.hdr を配信できないため、環境マップは空の JPG で代用される）。
 公開手順: `npm run build` → `dist/index.html` から doctype/html/head/body タグを除いたページと、`dist/assets` 以下（.hdr を除く）を Artifact に publish。
 
+## 9.5 予定: Google ドライブのアセット群の組み込み（依頼者からの指示）
+
+- 依頼者が別の AI（GPT）で作らせている **1000 を超えるアセット群**を、Google ドライブにアップロード中（2026-10-14 時点で作業途中）。**最終的にゲームに組み込む**予定。
+- 置き場所: 依頼者のマイドライブ。親フォルダ ID `15xfKOh-dN5NqVp5XsnHLZKWsV-ZvNR8w` の中に、2026-10-14 時点で次のものがある:
+  - `Game6_SharedPBR30_Editable.zip`（約 34MB）
+  - `01_Baseline700_QualityV2` / `02_Expansion540_Original` / `03_NewV3_Final` / `04_Textured_Revisions`（フォルダ）
+- Claude のセッションからは Google Drive コネクタ（`mcp__Google_Drive__*`）で読める。アップロードが終わったと依頼者から連絡があってから、中身（形式・命名・ライセンス）を確認して組み込み方針を決める。
+- 組み込み時の注意: スマホでも動く軽さを保つ（テクスチャ解像度・ポリゴン数・まとめて読み込む量）。出典とライセンスは `public/assets/CREDITS.md` に追記する。
+
 ## 10. 今後の拡張の指針
 
 - **モデルの差し替え**: `Soldier` は部位ごとの TransformNode の下にメッシュをぶら下げているだけなので、glTF を読み込んで部位ノードに付け替えれば見た目だけ変えられる。スキンメッシュを使う場合は Babylon の `Ragdoll`（Physics/v2/ragdoll）ではなく、ボーンを本作の `Ragdoll` の各パーツノードに追従させる方式が楽。
