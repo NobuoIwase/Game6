@@ -1,0 +1,12 @@
+{
+  "_comment": "ゲームに入れるアセットの選択。role はゲーム側での使い道（src/world/AssetLibrary.ts）。states は書き出す状態。limit は ID を均等に間引く数。packSize は 1 つのパックにまとめる最大件数（パックは 1 ファイル 15MB 以下になるよう自動で分割）。",
+  "groups": [
+    { "role": "building", "match": "building_\\d+", "states": ["normal", "lod1", "lod2", "wreck"], "packSize": 20 },
+    { "role": "highrise", "match": "ahx_\\d+", "states": ["normal", "lod1", "lod2", "wreck"], "packSize": 4 },
+    { "role": "shop", "match": "shop_\\d+", "states": ["normal", "lod2", "wreck"], "packSize": 34 },
+    { "role": "vehicle", "match": "vehicle_\\d+", "states": ["normal", "lod1", "lod2"], "limit": 60, "packSize": 12 },
+    { "role": "prop", "match": "prop_\\d+", "states": ["normal", "lod2"], "packSize": 50 },
+    { "role": "infra", "match": "infra_\\d+", "states": ["normal", "lod2"], "packSize": 50 },
+    { "role": "street", "match": "ssv_\\d+", "states": ["normal", "lod2"], "packSize": 18 }
+  ]
+}

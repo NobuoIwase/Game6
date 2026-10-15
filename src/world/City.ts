@@ -12,7 +12,6 @@
 // 当たり判定は自前（物理エンジン不要で軽い）。ラグドールや車のために Havok の静的ボディも付ける。
 // ============================================================================
 import {
-  InstancedMesh,
   Matrix,
   Mesh,
   MeshBuilder,
@@ -34,6 +33,22 @@ import {
 import { CityMaterials, FACADE_SPECS, FacadeStyle } from "./Materials";
 import { COL_STATIC, COL_ALL } from "../core/Physics";
 import { createProps, PropBatch, PropKit, wirePath } from "./Props";
+import type { AssetDef, AssetLibrary, AssetStateName } from "./AssetLibrary";
+
+/** realizeAssets() で置くモデルの予約 */
+interface PendingPlace {
+  id: string;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  parent: TransformNode | null;
+  states?: AssetStateName[];
+  /** 影を落とす */
+  cast?: boolean;
+  /** 動くもの（車）。行列を固定しない */
+  moving?: boolean;
+}
 
 export const CITY_HALF = 250;
 const PITCH = 72;
@@ -94,6 +109,8 @@ export interface Building {
   collapseT: number;
   /** 建物に付いた小物（thin instance）。倒壊時に一緒に沈める */
   thin: { batch: PropBatch; idx: number }[];
+  /** 外部アセットの建物（倒壊後に wreck 状態のモデルを置く） */
+  asset?: { id: string; x: number; y: number; z: number; yaw: number };
 }
 
 export interface RayHit {
@@ -104,7 +121,7 @@ export interface RayHit {
 }
 
 export interface Car {
-  mesh: InstancedMesh;
+  mesh: TransformNode;
   body: PhysicsBody;
 }
 
@@ -179,10 +196,15 @@ export class City {
   private concrete: PBRMaterial;
   private awnings: PBRMaterial[];
 
+  private assets: AssetLibrary | null;
+  private pending: PendingPlace[] = [];
+
   constructor(
     private scene: Scene,
     private mats: CityMaterials,
+    assets: AssetLibrary | null = null,
   ) {
+    this.assets = assets?.ready ? assets : null;
     this.concrete = mats.roof;
     this.steel = new PBRMaterial("bridgeSteel", scene);
     this.steel.albedoColor = new Color3(0.25, 0.42, 0.45);
@@ -207,6 +229,7 @@ export class City {
       rooftile: this.mats.rooftile,
       corrugated: this.mats.corrugated,
     });
+    if (this.assets) this.buildPools();
     this.buildGround();
     this.carTemplates = this.createCarTemplates();
     this.layoutBlocks();
@@ -215,10 +238,16 @@ export class City {
     this.buildHighway();
     this.buildFootbridge(12);
     this.buildMarkings();
-    this.buildLamps();
-    this.buildStreetFurniture();
-    this.buildCars();
-    this.buildSkyline();
+    if (this.assets) {
+      this.assetStreet();
+      this.assetCars();
+      this.assetSkyline();
+    } else {
+      this.buildLamps();
+      this.buildStreetFurniture();
+      this.buildCars();
+      this.buildSkyline();
+    }
     for (const b of this.props.all) b.build();
     for (const b of this.props.all) this.shadowCasters.push(b.mesh);
     if (this.wires.length) {
@@ -402,6 +431,7 @@ export class City {
       const px = x + rand(-0.6, 0.6),
         pz = z + rand(-0.6, 0.6);
       const front = this.frontOf(bl, px, pz);
+      if (this.assets && this.assetLot(bl, ring, kind === "shop" ? x : px, kind === "shop" ? z : pz, kind === "shop" ? w : bw, kind === "shop" ? d : bd, front, kind)) continue;
       switch (kind) {
         case "glass":
           this.buildTower(px, pz, bw, bd, ring, front);
@@ -447,7 +477,8 @@ export class City {
         used.add(`${a + da},${c + dc}`);
       const px = x0 + (a + 1) * cw,
         pz = z0 + (c + 1) * cd;
-      this.buildApartment(px, pz, cw * 2 - 3, cd * 2 - 3, this.frontOf(bl, px, pz));
+      if (!this.assets || !this.assetInLot(this.pools!.mid, px, pz, cw * 2 - 1.5, cd * 2 - 1.5, this.frontOf(bl, px, pz), "apartment", 0.2))
+        this.buildApartment(px, pz, cw * 2 - 3, cd * 2 - 3, this.frontOf(bl, px, pz));
     }
     for (let a = 0; a < nx; a++)
       for (let c = 0; c < nz; c++) {
@@ -461,6 +492,7 @@ export class City {
           pick(this.props.vending).add(m);
           continue;
         }
+        if (this.assets && this.assetInLot(this.pools!.house, px, pz, cw - 0.6, cd - 0.6, this.frontOf(bl, px, pz), "house", 0.2)) continue;
         this.buildHouse(px, pz, cw, cd, this.frontOf(bl, px, pz));
       }
   }
@@ -563,7 +595,9 @@ export class City {
       if (Math.hypot((tx - px) / 1.4, tz - pz) < Math.min(W, D) * 0.2) continue;
       this.addTree(tx, tz, rand(0.9, 1.4));
     }
+    if (this.assets) this.assetPark(cx, cz, W, D);
     // ベンチ
+    if (!this.assets)
     for (const [bx, bz, r] of [
       [cx + 6, cz + 2.8, Math.PI],
       [cx - 6, cz + 2.8, Math.PI],
@@ -758,12 +792,12 @@ export class City {
     }
   }
 
-  private addWires(a: Vector3, b: Vector3, yaw: number) {
+  private addWires(a: Vector3, b: Vector3, yaw: number, top = 9.25) {
     const off = new Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
     for (const [h, o] of [
-      [9.25, 0.9],
-      [9.25, -0.9],
-      [8.45, 0.6],
+      [top, 0.9],
+      [top, -0.9],
+      [top - 0.8, 0.6],
     ]) {
       const pa = a.add(off.scale(o)).addInPlace(new Vector3(0, h + SIDEWALK_H, 0));
       const pb = b.add(off.scale(o)).addInPlace(new Vector3(0, h + SIDEWALK_H, 0));
@@ -1306,6 +1340,344 @@ export class City {
     }
   }
 
+  // ------------------------------------------------------------------ 外部アセット（GLB）で街を作る
+  /*
+   * docs/HANDOFF.md 9.5 のアセット群を使う。台帳（寸法）だけで配置と当たり判定を決め、
+   * 実際のモデルは build() の後の realizeAssets() でまとめて読み込んでインスタンス化する。
+   * 各モデルの前方は +Z（玄関・店先）。通りに面した向きに回転して置く。
+   */
+  private pools: Record<"house" | "mid" | "tower" | "industrial" | "shop" | "car", AssetDef[]> | null = null;
+
+  private buildPools() {
+    const A = this.assets!;
+    const sz = (d: AssetDef) => {
+      const n = d.states.normal!;
+      return { w: n.max[0] - n.min[0], h: n.max[1], d: n.max[2] - n.min[2] };
+    };
+    const IND = /工場|倉庫|焼却|格納庫|発電|整備|冷蔵|機械|サイロ|プラント|処理|変電|格納|組立/;
+    const bld = A.role("building").filter((d) => !IND.test(d.name));
+    this.pools = {
+      house: bld.filter((d) => {
+        const s = sz(d);
+        return Math.max(s.w, s.d) <= 13.5 && s.h <= 12;
+      }),
+      mid: bld.filter((d) => {
+        const s = sz(d);
+        return s.h > 8 && Math.max(s.w, s.d) > 10;
+      }),
+      tower: [...A.role("highrise"), ...bld.filter((d) => sz(d).h > 26)],
+      industrial: A.role("building").filter((d) => IND.test(d.name)),
+      shop: A.role("shop"),
+      car: A.role("vehicle").filter((d) => {
+        const s = sz(d);
+        return s.d > s.w && s.d <= 6.6 && s.h <= 3.3 && s.w >= 1.3;
+      }),
+    };
+  }
+
+  /**
+   * 回転後の外接寸法と、モデル原点から外接箱の中心までのずれ（ワールドの向き）。
+   * Babylon では glTF の x が反転する（右手系 → 左手系）。yaw は 90 度単位を想定。
+   */
+  private footprint(def: AssetDef, yaw: number, st: AssetStateName = "normal") {
+    const n = def.states[st] ?? def.states.normal!;
+    const minX = -n.max[0],
+      maxX = -n.min[0],
+      minZ = n.min[2],
+      maxZ = n.max[2];
+    const lcx = (minX + maxX) / 2,
+      lcz = (minZ + maxZ) / 2,
+      w = maxX - minX,
+      d = maxZ - minZ;
+    const c = Math.round(Math.cos(yaw)),
+      s = Math.round(Math.sin(yaw));
+    const swap = Math.abs(s) === 1;
+    return { ww: swap ? d : w, dd: swap ? w : d, ox: lcx * c + lcz * s, oz: -lcx * s + lcz * c, lcx, lcz, h: n.max[1], minY: n.min[1] };
+  }
+
+  /** 区画（w×d、正面 front）に収まるモデルを選ぶ。大きく埋まるものほど選ばれやすい */
+  private pickFit(pool: AssetDef[], w: number, d: number, front: Vector3, minFill = 0.25): AssetDef | null {
+    const yaw = Math.atan2(front.x, front.z);
+    const fits: { def: AssetDef; fill: number }[] = [];
+    for (const def of pool) {
+      const f = this.footprint(def, yaw);
+      if (f.ww > w - 0.6 || f.dd > d - 0.6) continue;
+      const fill = (f.ww * f.dd) / (w * d);
+      if (fill >= minFill) fits.push({ def, fill });
+    }
+    if (!fits.length) return null;
+    fits.sort((a, b) => b.fill - a.fill);
+    const top = fits.slice(0, Math.max(4, Math.ceil(fits.length * 0.4)));
+    return pick(top).def;
+  }
+
+  /**
+   * モデルを建物として置く。(tx, tz) = 外接箱の中心。当たり判定は外接箱 1 つ。
+   * @returns 作った建物
+   */
+  private placeAssetBuilding(def: AssetDef, tx: number, tz: number, front: Vector3, kind: BuildingKind, hp?: number): Building {
+    const yaw = Math.atan2(front.x, front.z);
+    const f = this.footprint(def, yaw);
+    const B = new Builder(tx, tz);
+    B.roofClutter = false;
+    const h = f.h + SIDEWALK_H;
+    B.solid(new Vector3(0, h / 2, 0), new Vector3(f.ww, h, f.dd));
+    const b = this.finish(B, kind, hp);
+    b.asset = { id: def.id, x: tx - f.ox, y: SIDEWALK_H, z: tz - f.oz, yaw };
+    this.pending.push({ id: def.id, x: -f.ox, y: SIDEWALK_H, z: -f.oz, yaw, parent: b.root, cast: true });
+    return b;
+  }
+
+  /** 区画の中で、正面を通り側へ寄せて建てる（街並みの壁面をそろえる） */
+  private assetInLot(pool: AssetDef[], x: number, z: number, w: number, d: number, front: Vector3, kind: BuildingKind, minFill = 0.25): Building | null {
+    const def = this.pickFit(pool, w, d, front, minFill);
+    if (!def) return null;
+    const f = this.footprint(def, Math.atan2(front.x, front.z));
+    const room = Math.abs(front.x) > 0.5 ? (w - f.ww) / 2 : (d - f.dd) / 2;
+    const push = Math.max(0, room - rand(0.6, 2.2));
+    return this.placeAssetBuilding(def, x + front.x * push, z + front.z * push, front, kind);
+  }
+
+  /** 区画の正面に店を横一列に並べ、奥の余った所に建物を置く（商店街） */
+  private shopRow(x: number, z: number, w: number, d: number, front: Vector3) {
+    const P = this.pools!;
+    const yaw = Math.atan2(front.x, front.z);
+    const sideways = Math.abs(front.x) > 0.5;
+    const len = sideways ? d : w; // 間口方向の長さ
+    const depth = sideways ? w : d; // 奥行き方向の長さ
+    const tan = new Vector3(front.z, 0, -front.x);
+    let t = -len / 2 + 0.4;
+    let maxDepth = 0;
+    for (let guard = 0; guard < 12; guard++) {
+      const def = pick(P.shop);
+      const f = this.footprint(def, yaw);
+      const wid = sideways ? f.dd : f.ww;
+      const dep = sideways ? f.ww : f.dd;
+      if (t + wid > len / 2 - 0.4 || dep > depth - 1) break;
+      const off = depth / 2 - dep / 2 - 0.5;
+      this.placeAssetBuilding(def, x + tan.x * (t + wid / 2) + front.x * off, z + tan.z * (t + wid / 2) + front.z * off, front, "shop", 300);
+      maxDepth = Math.max(maxDepth, dep);
+      t += wid + rand(0.3, 1.2);
+    }
+    // 奥: 残りの奥行きに住宅や小さなビル
+    const rest = depth - maxDepth - 2.5;
+    if (rest > 7) {
+      const bx = x - front.x * (depth / 2 - rest / 2 - 0.4),
+        bz = z - front.z * (depth / 2 - rest / 2 - 0.4);
+      const bw = sideways ? rest : w,
+        bd = sideways ? d : rest;
+      this.assetInLot(Math.random() < 0.5 ? P.house : P.mid, bx, bz, bw, bd, front, "apartment", 0.15);
+    }
+  }
+
+  /** ビル街・商店街の 1 区画（外部アセット版）。置けなければ false（従来の建物にする） */
+  private assetLot(bl: Block, ring: number, x: number, z: number, w: number, d: number, front: Vector3, kind: BuildingKind): boolean {
+    const P = this.pools!;
+    if (kind === "garage") return false; // 立体駐車場は中に入れる手作りのまま
+    if (kind === "shop") {
+      this.shopRow(x, z, w, d, front);
+      return true;
+    }
+    const big = w * d > 1400;
+    let pool: AssetDef[];
+    if (bl.kind === "business") pool = big || kind === "glass" ? P.tower : Math.random() < 0.5 ? P.tower : P.mid;
+    else pool = Math.random() < 0.12 ? P.industrial : P.mid;
+    const b = this.assetInLot(pool, x, z, w, d, front, kind, big ? 0.3 : 0.2) ?? this.assetInLot(P.mid, x, z, w, d, front, kind, 0.12);
+    void ring;
+    return !!b;
+  }
+
+  /** 遠景（マップの外周）: 簡略版（lod2）のビルを並べる */
+  private assetSkyline() {
+    const P = this.pools!;
+    const tall = [...P.tower, ...P.mid];
+    for (let k = 0; k < 110; k++) {
+      const ang = (k / 110) * Math.PI * 2 + rand(-0.02, 0.02);
+      const dist = rand(CITY_HALF + 35, 470);
+      const def = pick(tall);
+      const yaw = Math.round(rand(0, 4)) * (Math.PI / 2);
+      this.pending.push({ id: def.id, x: Math.cos(ang) * dist, y: 0, z: Math.sin(ang) * dist, yaw, parent: null, states: ["lod2"] });
+    }
+  }
+
+  /** 路上駐車の車（外部アセット版）。爆発で吹き飛ぶ動的ボディ */
+  private assetCars() {
+    const P = this.pools!;
+    if (!P.car.length) return;
+    let n = 0;
+    for (const bl of this.blocks) {
+      if (bl.kind === "plaza") continue;
+      const count = 1 + ((Math.random() * 3) | 0);
+      for (let k = 0; k < count; k++) {
+        const side = (Math.random() * 4) | 0;
+        let x = 0,
+          z = 0,
+          ry = 0;
+        if (side === 0) (x = rand(bl.minX + 8, bl.maxX - 8)), (z = bl.maxZ + 2.2), (ry = Math.PI / 2);
+        else if (side === 1) (x = rand(bl.minX + 8, bl.maxX - 8)), (z = bl.minZ - 2.2), (ry = -Math.PI / 2);
+        else if (side === 2) (x = bl.maxX + 2.2), (z = rand(bl.minZ + 8, bl.maxZ - 8)), (ry = 0);
+        else (x = bl.minX - 2.2), (z = rand(bl.minZ + 8, bl.maxZ - 8)), (ry = Math.PI);
+        if (Math.abs(x - HIGHWAY_X) < 12) continue;
+        const def = pick(P.car);
+        const f = this.footprint(def, 0);
+        const node = new TransformNode(`car_${n++}`, this.scene);
+        node.position.set(x, f.h / 2 + 0.02, z);
+        node.rotationQuaternion = Quaternion.FromEulerAngles(0, ry + rand(-0.06, 0.06), 0);
+        const body = new PhysicsBody(node, PhysicsMotionType.DYNAMIC, true, this.scene);
+        const w = f.ww,
+          d = f.dd;
+        const shape = new PhysicsShapeBox(Vector3.Zero(), Quaternion.Identity(), new Vector3(w, f.h, d), this.scene);
+        shape.filterMembershipMask = COL_STATIC;
+        shape.filterCollideMask = COL_ALL;
+        shape.material = { friction: 0.8, restitution: 0.1 };
+        body.shape = shape;
+        body.setMassProperties({ mass: 900 + w * d * f.h * 60 });
+        body.setAngularDamping(0.3);
+        this.cars.push({ mesh: node, body });
+        this.pending.push({ id: def.id, x: -f.lcx, y: -f.h / 2, z: -f.lcz, yaw: 0, parent: node, cast: true, moving: true });
+      }
+    }
+  }
+
+  /** 小物を置く（id の候補から 1 つ） */
+  private prop(ids: string[], x: number, z: number, yaw: number, y = SIDEWALK_H, cast = false) {
+    const ok = ids.filter((i) => this.assets!.get(i));
+    if (!ok.length) return;
+    this.pending.push({ id: pick(ok), x, y, z, yaw, parent: null, cast });
+  }
+
+  /** 街路の設備・小物（外部アセット版）: 電柱と電線、信号、標識、街灯、バス停、自販機、ベンチなど */
+  private assetStreet() {
+    const I = (n: number[]) => n.map((k) => `infra_${String(k).padStart(3, "0")}`);
+    const Pp = (n: number[]) => n.map((k) => `prop_${String(k).padStart(3, "0")}`);
+    const S = (n: number[]) => n.map((k) => `ssv_${String(k).padStart(3, "0")}`);
+    const poles = I([61, 62, 63, 64, 66, 67, 68, 70]);
+    // 電柱と電線: 住宅街と商店街の街区のまわり
+    for (const bl of this.blocks) {
+      if (bl.kind !== "residential" && bl.kind !== "mixed") continue;
+      const inset = 0.8;
+      const edges: [Vector3, Vector3][] = [
+        [new Vector3(bl.minX + inset, 0, bl.minZ + inset), new Vector3(bl.maxX - inset, 0, bl.minZ + inset)],
+        [new Vector3(bl.maxX - inset, 0, bl.minZ + inset), new Vector3(bl.maxX - inset, 0, bl.maxZ - inset)],
+        [new Vector3(bl.maxX - inset, 0, bl.maxZ - inset), new Vector3(bl.minX + inset, 0, bl.maxZ - inset)],
+        [new Vector3(bl.minX + inset, 0, bl.maxZ - inset), new Vector3(bl.minX + inset, 0, bl.minZ + inset)],
+      ];
+      for (const [a, b] of edges) {
+        if (Math.abs(a.z - b.z) < 1 && Math.abs(Math.abs(a.z - AVENUE_Z) - ROAD_W_Z[3] / 2) < 2) continue;
+        const len = Vector3.Distance(a, b);
+        const n = Math.max(1, Math.round(len / 22));
+        const dir = b.subtract(a).normalize();
+        const yaw = Math.atan2(dir.x, dir.z) + Math.PI / 2;
+        let prev: Vector3 | null = null;
+        for (let k = 0; k <= n; k++) {
+          if (k === n && n > 1) break;
+          const p = Vector3.Lerp(a, b, k / n);
+          this.prop(poles, p.x, p.z, yaw, SIDEWALK_H, true);
+          if (prev) this.addWires(prev, p, yaw, 6.55);
+          prev = p;
+        }
+        if (prev) this.addWires(prev, b, yaw, 6.55);
+        // 住宅街の角にカーブミラー
+        if (bl.kind === "residential" && Math.random() < 0.5) this.prop(I([89, 90]), a.x + dir.x * 1.5, a.z + dir.z * 1.5, yaw + Math.PI / 2);
+      }
+    }
+    // 交差点: 信号機と標識（街区の四隅）
+    for (const bl of this.blocks) {
+      const corners: [number, number, number][] = [
+        [bl.minX + 1.2, bl.minZ + 1.2, -Math.PI * 0.75],
+        [bl.maxX - 1.2, bl.minZ + 1.2, Math.PI * 0.75],
+        [bl.maxX - 1.2, bl.maxZ - 1.2, Math.PI * 0.25],
+        [bl.minX + 1.2, bl.maxZ - 1.2, -Math.PI * 0.25],
+      ];
+      for (const [x, z, yaw] of corners) {
+        const onAvenue = Math.abs(Math.abs(z - AVENUE_Z) - ROAD_W_Z[3] / 2 - 1.2) < 1.5;
+        if (onAvenue) this.prop(I([1, 5, 8]), x, z, yaw, SIDEWALK_H, true);
+        else if (Math.random() < 0.45) this.prop(I([2, 3, 4]), x, z, yaw, SIDEWALK_H, true);
+        else if (Math.random() < 0.6) this.prop(I([11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]), x, z, yaw);
+      }
+    }
+    // 街灯: ビル街・商店街の歩道
+    for (const bl of this.blocks) {
+      if (bl.kind === "plaza" || bl.kind === "residential") continue;
+      const cx = (bl.minX + bl.maxX) / 2,
+        cz = (bl.minZ + bl.maxZ) / 2;
+      const lamps = bl.kind === "business" ? I([76, 77, 81]) : I([78, 85, 79]);
+      for (const along of [-14, 14]) {
+        for (const z of [bl.minZ + 0.8, bl.maxZ - 0.8]) this.prop(lamps, cx + along, z, z < cz ? Math.PI : 0, SIDEWALK_H, true);
+        for (const x of [bl.minX + 0.8, bl.maxX - 0.8]) this.prop(lamps, x, cz + along, x < cx ? -Math.PI / 2 : Math.PI / 2, SIDEWALK_H, true);
+      }
+    }
+    // 歩道の小物: 自販機・ベンチ・ごみ箱・ポスト・駐輪ラック・EV 充電・AED・案内端末
+    const walk = Pp([51, 52, 41, 42, 47, 57, 60, 55, 53, 31]);
+    for (const bl of this.blocks) {
+      if (bl.kind === "plaza" || bl.kind === "park") continue;
+      const cx = (bl.minX + bl.maxX) / 2,
+        cz = (bl.minZ + bl.maxZ) / 2;
+      const n = bl.kind === "residential" ? 3 : 7;
+      for (let k = 0; k < n; k++) {
+        const side = (Math.random() * 4) | 0;
+        // 建物の側（内側）を向いて歩道の端に立つ
+        if (side < 2) {
+          const z = side === 0 ? bl.minZ + 2.9 : bl.maxZ - 2.9;
+          this.prop(walk, rand(bl.minX + 5, bl.maxX - 5), z, z < cz ? 0 : Math.PI, SIDEWALK_H, true);
+        } else {
+          const x = side === 2 ? bl.minX + 2.9 : bl.maxX - 2.9;
+          this.prop(walk, x, rand(bl.minZ + 5, bl.maxZ - 5), x < cx ? Math.PI / 2 : -Math.PI / 2, SIDEWALK_H, true);
+        }
+      }
+      if (bl.kind === "business" && Math.random() < 0.6) this.prop(S([1, 2, 4, 8, 9]), bl.minX + 2.6, cz + rand(-10, 10), Math.PI / 2, SIDEWALK_H, true);
+    }
+    // 大通り: バス停と植え込み脇の防護柵
+    const half = ROAD_W_Z[3] / 2;
+    for (let k = 0; k < LINES.length - 1; k++) {
+      if (Math.random() < 0.6) this.prop(I([87, 88, 86]), (LINES[k] + LINES[k + 1]) / 2 + rand(-8, 8), AVENUE_Z + half + 1.8, Math.PI, SIDEWALK_H, true);
+      if (Math.random() < 0.6) this.prop(I([87, 88, 86]), (LINES[k] + LINES[k + 1]) / 2 + rand(-8, 8), AVENUE_Z - half - 1.8, 0, SIDEWALK_H, true);
+    }
+    // マンホール（車道）
+    for (let k = 0; k < 60; k++) {
+      const x = pick(LINES) + rand(-3, 3),
+        z = rand(-240, 240);
+      this.prop(I([44]), x, z, rand(0, 6.28), 0.0);
+    }
+  }
+
+  /** 公園の遊具・ベンチ・水飲み台（外部アセット版） */
+  private assetPark(cx: number, cz: number, W: number, D: number) {
+    const Pp = (n: number[]) => n.map((k) => `prop_${String(k).padStart(3, "0")}`);
+    const play = Pp([11, 12, 13, 14, 15, 16, 17, 10]);
+    const ox = cx - W * 0.25,
+      oz = cz - D * 0.22;
+    for (let k = 0; k < 7; k++) this.prop(play, ox + rand(-8, 8), oz + rand(-7, 7), rand(0, 6.28), SIDEWALK_H, true);
+    for (const [bx, bz, r] of [
+      [cx + 6, cz + 2.8, Math.PI],
+      [cx - 6, cz + 2.8, Math.PI],
+      [cx + 6, cz - 2.8, 0],
+      [cx - 6, cz - 2.8, 0],
+      [cx + 2.8, cz + 8, -Math.PI / 2],
+      [cx - 2.8, cz - 8, Math.PI / 2],
+    ])
+      this.prop(Pp([1, 1, 3]), bx, bz, r);
+    this.prop(Pp([21]), cx + 3, cz + 3, 0);
+    this.prop(Pp([41]), cx - 3, cz - 3, 0);
+    this.prop(Pp([2]), cx + W * 0.28, cz + D * 0.3, 0.3);
+    this.prop(Pp([23]), cx + W * 0.18, cz - D * 0.12, 0);
+  }
+
+  /** build() の後に呼ぶ: 必要なパックを読み込み、予約した位置にモデルを置く */
+  async realizeAssets(onProgress?: (done: number, total: number) => void) {
+    const A = this.assets;
+    if (!A || !this.pending.length) return;
+    await A.preload(new Set(this.pending.map((p) => p.id)), onProgress);
+    for (const q of this.pending) {
+      const p = A.place(q.id, q.x, q.y, q.z, q.yaw, q.parent, q.states);
+      if (!p) continue;
+      if (q.moving) p.isStatic = false;
+      if (q.cast) for (const m of p.meshes) this.shadowCasters.push(m as unknown as Mesh);
+    }
+    this.pending = [];
+    A.freezeStatic();
+  }
+
   // ------------------------------------------------------------------ 空間グリッド
   private key(ix: number, iz: number) {
     return (ix + 100) * 1000 + (iz + 100);
@@ -1488,7 +1860,7 @@ export class City {
   private startCollapse(b: Building) {
     b.state = "collapsing";
     b.collapseT = 0;
-    for (const m of b.root.getChildMeshes()) m.unfreezeWorldMatrix();
+    for (const n of b.root.getDescendants(false)) if (n instanceof TransformNode) n.unfreezeWorldMatrix();
     if (b.body) {
       b.body.shape?.dispose();
       b.body.dispose();
@@ -1524,6 +1896,17 @@ export class City {
       if (k >= 1) {
         b.state = "gone";
         b.root.dispose();
+        if (b.asset && this.assets) {
+          // 外部アセットの建物は、壊れた状態のモデル（wreck）に差し替える
+          const a = b.asset;
+          const p = this.assets.place(a.id, a.x, a.y, a.z, a.yaw, null, ["wreck"]);
+          if (p) {
+            p.wrecked = true;
+            p.show("wreck");
+            this.onCollapseEnd?.(b);
+            continue;
+          }
+        }
         const rub = MeshBuilder.CreateCylinder(
           "rubble",
           { diameterTop: Math.min(b.hw, b.hd) * 0.6, diameterBottom: Math.max(b.hw, b.hd) * 2.1, height: 2.2, tessellation: 7 },

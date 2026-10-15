@@ -29,6 +29,7 @@ import type { DifficultyDef, MissionDef } from "../data/missions";
 import type { WeaponDef } from "../data/weapons";
 import { corpseBodyOf, CorpseBody, enableHavok, Ragdoll, RigPart } from "./Physics";
 import { buildNationStake } from "../world/Stake";
+import { AssetLibrary } from "../world/AssetLibrary";
 import { Bot, BotOptions } from "./Bot";
 import { City } from "../world/City";
 import { createCityMaterials } from "../world/Materials";
@@ -176,8 +177,13 @@ export class Game implements GameContext {
     // ---- 街 ----
     this.progress(0.35, "市街地を生成中...");
     const mats = await createCityMaterials(scene);
-    this.city = new City(scene, mats);
+    // 外部アセット（GLB）の台帳。無ければ従来の手作りの街になる
+    this.assets = new AssetLibrary(scene);
+    await this.assets.loadCatalog();
+    this.city = new City(scene, mats, this.assets);
     this.city.build();
+    this.progress(0.45, "建物・車・街路のモデルを読み込み中...");
+    await this.city.realizeAssets((d, t) => this.progress(0.45 + (d / t) * 0.14, `建物・車・街路のモデルを読み込み中... (${d}/${t})`));
     this.city.onCollapseStart = (b) => {
       // 建物が爆発して崩れ落ちる（見た目だけの爆発を時間差で連続させる）
       const center = new Vector3(b.cx, b.height / 2, b.cz);
@@ -604,6 +610,9 @@ export class Game implements GameContext {
     input.endFrame();
   }
 
+  /** 外部アセット（建物・車・小物のモデル） */
+  assets!: AssetLibrary;
+
   /** 自動操縦（AI のテストプレイ用。null なら人間が操作） */
   bot: Bot | null = null;
 
@@ -646,6 +655,7 @@ export class Game implements GameContext {
     this.projectiles.update(dt);
     this.pickups.update(dt, this.player, this.time);
     this.city.update(dt);
+    this.assets.update(dt, this.camera.position);
     this.updateCorpses(dt);
     if (this.colossus && !this.colossus.update(dt)) this.colossus = null;
     this.effects.update(dt);

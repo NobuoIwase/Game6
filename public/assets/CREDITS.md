@@ -18,3 +18,9 @@ License: https://polyhaven.com/license
 
 各テクスチャは `_diff`（アルベド）/ `_nor`（OpenGL 法線）/ `_arm`（R=AO, G=粗さ, B=金属度）の 1K JPG。
 再取得は `npm run fetch-assets`（scripts/fetch-assets.mjs）。
+
+## models/（建物・車・街路の 3D モデル）
+
+依頼者（プロジェクトオーナー）が別の AI（GPT）で制作したオリジナルのモデル群。Google ドライブで共有されたものを、
+`npm run import-assets`（scripts/import_assets.py と scripts/build_packs.mjs）でパック GLB に変換して収録している。
+元データ・制作記録はドライブのフォルダ（scripts/asset_sources.json の drive_folder）を参照。
