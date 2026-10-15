@@ -184,6 +184,7 @@ v0.4.0 で追加確認: 陸戦兵の各ポーズ（待機・走り4位相・ダ�
 **未確認**: 実 GPU での fps、スマホ実機での操作感と性能（ユーザーのスマホで v0.1 が動作したことは確認済み）。
 
 テストプレイ用の公開先: claude.ai のアーティファクト（.hdr を配信できないため、環境マップは空の JPG で代用される）。
+.glb も配信できないため、公開用は `VITE_MODEL_EXT=.glb.wasm npx vite build --base ./` でビルドし、assets/models/*.glb を *.glb.wasm に改名して載せる（中身は同じ。AssetLibrary が拡張子を .glb として読み込む）。
 公開手順: `npm run build` → `dist/index.html` から doctype/html/head/body タグを除いたページと、`dist/assets` 以下（.hdr を除く）を Artifact に publish。
 
 ## 9.5 Google ドライブのアセット群（v0.5.0 で一部組み込み済み）

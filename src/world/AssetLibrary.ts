@@ -164,7 +164,10 @@ export class AssetLibrary {
   }
 
   private async loadPack(name: string) {
-    const c = await SceneLoader.LoadAssetContainerAsync(this.base, name + ".glb", this.scene);
+    // 公開先（Claude のアーティファクト）は .glb を配信できないため、ビルド時に VITE_MODEL_EXT=.glb.wasm を
+    // 指定して名前だけ変えたファイルを読む（中身は同じ GLB。読み込み側には拡張子 .glb として伝える）
+    const ext = import.meta.env.VITE_MODEL_EXT || ".glb";
+    const c = await SceneLoader.LoadAssetContainerAsync(this.base, name + ext, this.scene, null, ".glb");
     c.addAllToScene();
     this.packs.set(name, c);
     for (const root of c.rootNodes) {
