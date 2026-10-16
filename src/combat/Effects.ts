@@ -1231,17 +1231,17 @@ export class Effects {
   }
 
   /** 建物倒壊の土煙 */
-  collapseDust(cx: number, cz: number, hw: number, hd: number, intensity = 1) {
+  collapseDust(cx: number, cz: number, hw: number, hd: number, intensity = 1, baseY = 0) {
     const n = 4;
     for (let i = 0; i < n; i++) {
-      this.tv1.set(cx + (Math.random() - 0.5) * hw * 2, 1, cz + (Math.random() - 0.5) * hd * 2);
+      this.tv1.set(cx + (Math.random() - 0.5) * hw * 2, baseY + 1, cz + (Math.random() - 0.5) * hd * 2);
       this.dust.emit(this.tv1, 6 * this.particleScale * intensity, { radius: Math.max(hw, hd) * 0.6, size: 2.5, power: 7 });
     }
     // 地面を走る砂煙の輪
-    this.tv1.set(cx, 0.8, cz);
+    this.tv1.set(cx, baseY + 0.8, cz);
     this.dustRing.emit(this.tv1, this.q(20 * intensity), { ring: true, radius: Math.max(hw, hd), size: Math.max(hw, hd) * 0.35, power: 14 });
     this.tv2.set(0, 1, 0);
-    this.tv1.set(cx, 2, cz);
+    this.tv1.set(cx, baseY + 2, cz);
     this.throwChips(this.tv1, this.q(6 * intensity), this.tv2, 9, 1, 0.5, 3, DEBRIS_COLORS, 0);
   }
 

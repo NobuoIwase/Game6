@@ -274,7 +274,7 @@ export class Player {
   private getUp() {
     const pelvis = this.soldier.endRagdoll();
     const p = this.position;
-    p.set(pelvis.x, 0, pelvis.z);
+    p.set(pelvis.x, pelvis.y, pelvis.z);
     this.ctx.city.clampToMap(p, 1);
     // 建物にめり込んでいたら押し出す
     for (let i = 0; i < 4; i++) this.ctx.city.collideCircle(p, this.radius, this.height);

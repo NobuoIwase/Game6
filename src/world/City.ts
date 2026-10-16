@@ -1,5 +1,5 @@
 // ============================================================================
-// 市街地マップの生成と、静的な当たり判定（AABB = 軸に平行な箱の集まり）。
+// 市街地マップの生成。広域検索はAABB、任意角度の衝突はOBB、道路は三角形地形。
 // ----------------------------------------------------------------------------
 // 建物の種類:
 //   office    : コンクリートのオフィスビル
@@ -29,11 +29,16 @@ import {
   Vector3,
   Vector4,
   Color3,
+  DynamicTexture,
 } from "@babylonjs/core";
 import { CityMaterials, FACADE_SPECS, FacadeStyle } from "./Materials";
 import { COL_STATIC, COL_ALL } from "../core/Physics";
 import { createProps, PropBatch, PropKit, wirePath } from "./Props";
 import type { AssetDef, AssetLibrary, AssetStateName } from "./AssetLibrary";
+import { NEIGHBORHOOD_HALF } from "../data/neighborhood";
+import { RoadNetwork, parcelWorld, parcelLocal, type Parcel } from "./RoadNetwork";
+import { makeParcels, makeTerrain, inCentralPark } from "./NeighborhoodPlan";
+import type { Terrain } from "./Terrain";
 
 /** realizeAssets() で置くモデルの予約 */
 interface PendingPlace {
@@ -48,9 +53,10 @@ interface PendingPlace {
   cast?: boolean;
   /** 動くもの（車）。行列を固定しない */
   moving?: boolean;
+  scale?: Vector3;
 }
 
-export const CITY_HALF = 250;
+export const CITY_HALF = NEIGHBORHOOD_HALF;
 const PITCH = 72;
 const SIDEWALK_H = 0.12;
 const SIDEWALK_W = 4;
@@ -77,7 +83,7 @@ export interface Block {
 /** プレイヤーが乗り越えられる段差 */
 export const STEP_UP = 0.6;
 
-export type BuildingKind = "office" | "glass" | "apartment" | "garage" | "shop" | "monument" | "house" | "highway" | "bridge" | "hut";
+export type BuildingKind = "office" | "glass" | "apartment" | "garage" | "shop" | "monument" | "house" | "highway" | "bridge" | "hut" | "boundary";
 
 /** 当たり判定の箱（ワールド座標） */
 export interface Box {
@@ -88,6 +94,8 @@ export interface Box {
   maxY: number;
   maxZ: number;
   b: Building;
+  /** 広域検索はAABB、狭域はこの回転矩形。軸に平行な旧建物でも同じ経路を使う。 */
+  oriented?: { x: number; z: number; hw: number; hd: number; yaw: number };
 }
 
 export interface Building {
@@ -103,6 +111,7 @@ export interface Building {
   hw: number;
   hd: number;
   height: number;
+  baseY: number;
   hp: number;
   maxHp: number;
   state: "standing" | "collapsing" | "gone";
@@ -160,6 +169,8 @@ class Builder {
   roofClutter = true;
   signs = false;
   thin: { batch: PropBatch; m: Matrix }[] = [];
+  y = 0;
+  yaw = 0;
   constructor(
     public cx: number,
     public cz: number,
@@ -178,6 +189,10 @@ class Builder {
 }
 
 export class City {
+  terrain: Terrain | null = null;
+  roads: RoadNetwork | null = null;
+  parcels: Parcel[] = [];
+  readonly legacy = typeof location !== "undefined" && new URLSearchParams(location.search).get("layout") === "legacy";
   buildings: Building[] = [];
   cars: Car[] = [];
   private grid = new Map<number, Box[]>();
@@ -229,6 +244,10 @@ export class City {
       rooftile: this.mats.rooftile,
       corrugated: this.mats.corrugated,
     });
+    if (!this.legacy) {
+      this.buildNeighborhood();
+      return;
+    }
     if (this.assets) this.buildPools();
     this.buildGround();
     this.carTemplates = this.createCarTemplates();
@@ -258,7 +277,237 @@ export class City {
     }
   }
 
-  // ------------------------------------------------------------------ 地面・街区
+  // ------------------------------------------------------------------ 非格子街区
+  private buildNeighborhood() {
+    const pilot = typeof location !== "undefined" && new URLSearchParams(location.search).get("district") === "pilot";
+    this.roads = new RoadNetwork(pilot);
+    this.parcels = makeParcels(this.roads, this.assets?.defs ?? [], pilot);
+    this.terrain = makeTerrain(this.roads, this.parcels);
+    if (this.assets) this.buildPools();
+    const path = this.mats.plaza.clone("parkPath")!;
+    path.albedoColor = new Color3(.68,.61,.48);
+    const gravel = this.mats.sidewalk.clone("parcelApron")!;
+    gravel.albedoColor = new Color3(.72,.72,.68);
+    const grass = this.mats.grass.clone("neighborhoodGrass")!;
+    grass.albedoColor = new Color3(.55,.86,.42);
+    this.terrain.buildMeshes(this.scene,{grass,road:this.mats.road,sidewalk:this.mats.sidewalk,path,gravel,marking:this.mats.marking,drain:this.mats.darkMetal});
+    for(const p of this.parcels) {
+      this.placeParcel(p);
+      // GLBの有無に関わらず、各敷地の境界・入口・設備を生成する。
+      this.parcelBoundary(p);
+    }
+    this.neighborhoodFurniture();
+    for(const batch of this.props.all)batch.build();
+    // 木・電柱のみ。小さな設備を全てシャドウマップへ送らない。
+    for(const batch of [...this.props.trees,this.props.pole])if(batch.count)this.shadowCasters.push(batch.mesh);
+  }
+
+  private placeParcel(p: Parcel) {
+    if(p.use==="parking")return;
+    const def = this.assets?.get(p.assetId), f = def ? this.footprint(def,0) : null;
+    const w=f?.w??8,d=f?.d??9,h=f?f.h-f.minY:7;
+    const center=parcelWorld(p,0,-1.5),B=new Builder(center.x,center.z);
+    B.y=p.y;B.yaw=p.yaw;B.roofClutter=false;
+    if(def?.id==="tokyo_arcade_001"&&f) {
+      // 庇の下と約2.2mの奥まった入口を開ける。上階は外壁と床の固体として扱う。
+      const ox=-f.lcx,oz=-f.lcz;
+      B.solid(new Vector3(ox,h/2,oz-5.6),new Vector3(12,h,6.8));
+      B.solid(new Vector3(ox-4.07,1.55,oz-1.1),new Vector3(3.86,3.1,2.2));
+      B.solid(new Vector3(ox+3.04,1.55,oz-1.1),new Vector3(5.92,3.1,2.2));
+      B.solid(new Vector3(ox,(h+3.1)/2,oz-1.1),new Vector3(12,h-3.1,2.2));
+      B.solid(new Vector3(ox,.09,oz-4.5),new Vector3(12,.18,9));
+    } else if(def?.id==="tokyo_small_apartment_001"&&f) {
+      // glTFのX反転を含む寸法契約。外接箱で外階段・共用廊下を塞がない。
+      const ox=-f.lcx,oz=-f.lcz;
+      const solid=(x:number,y:number,z:number,w:number,h:number,d:number)=>B.solid(new Vector3(ox+x,y,oz+z),new Vector3(w,h,d));
+      solid(0,2.925,-3.05,9.6,5.85,6.1);
+      solid(0,6.45,-3.05,9.6,1.2,6.1);
+      solid(.65,.15,.75,11.1,.3,1.5);
+      solid(-.5,.075,1.7,7.8,.15,.4);
+      solid(.65,3.03,.75,11.1,.14,1.5);
+      solid(5.55,.15,-4.4,1.5,.3,1.1);
+      solid(6.75,.075,-1.7,1.1,.15,6.5);
+      for(let i=0;i<16;i++) {
+        const top=.3+(i+1)*.175;
+        solid(5.55,top/2,-4+(i+.5)*.25,1.2,top,.25);
+      }
+      solid(.7,3.67,1.46,11,.08,.07);
+      solid(6.14,3.67,.75,.07,1.14,1.5);
+    } else B.solid(new Vector3(0,h/2,0),new Vector3(w,h,d));
+    if(!def) {
+      const m=uvBox(this.scene,w,h,d,4);m.material=this.mats.plaster;B.part(m,new Vector3(0,h/2,0),new Vector3(w,h,d),false);
+      const roof=uvBox(this.scene,w+.4,.3,d+.4,3);roof.material=this.mats.rooftile;B.part(roof,new Vector3(0,h+.15,0),new Vector3(w+.4,.3,d+.4),false);
+    }
+    const kind:BuildingKind=p.use==="house"?"house":p.use==="company"?"office":p.use==="shop"||p.use==="arcade"?"shop":"apartment";
+    const b=this.finish(B,kind);
+    if(def&&f) {
+      const offset=parcelWorld({x:center.x,z:center.z,yaw:p.yaw},-f.lcx,-f.lcz);
+      b.asset={id:def.id,x:offset.x,y:B.y-f.minY,z:offset.z,yaw:p.yaw};
+      this.pending.push({id:def.id,x:-f.lcx,y:-f.minY,z:-f.lcz,yaw:0,parent:b.root,cast:true});
+    }
+    if(def?.id!=="tokyo_arcade_001")this.parcelDetails(b,p,w,h,d);
+  }
+
+  private parcelBoundary(p:Parcel) {
+    if(p.use==="shop"||p.use==="arcade")return;
+    const B=new Builder(p.x,p.z);B.y=p.y;B.yaw=p.yaw;B.roofClutter=false;
+    const wall=(x:number,z:number,w:number,h:number,d:number)=>{
+      const m=uvBox(this.scene,w,h,d,2);m.material=this.concrete;
+      B.part(m,new Vector3(x,h/2,z),new Vector3(w,h,d));
+    };
+    wall(0,-p.d/2+.1,p.w,.85,.2);
+    for(const side of [-1,1]) {
+      wall(side*(p.w/2-.1),-.7,.2,.85,p.d-1.4);
+      const len=Math.max(0,p.w/2-2.9);
+      if(len>.25)wall(side*(2.9+len/2),p.d/2-.1,len,.75,.2);
+    }
+    this.finish(B,"boundary",1e12);
+    // 擁壁は後背地との段差がある敷地だけ。排水孔が地表を向く。
+    const rear=parcelWorld(p,0,-p.d/2-.45),delta=p.y-this.roads!.elevation(rear.x,rear.z);
+    if(delta>.25)this.groundAsset("infra_093",rear.x,p.y-Math.min(1.5,delta),rear.z,p.yaw,new Vector3(Math.min(2,p.w/3),Math.min(.65,delta/2.2),.45));
+  }
+
+  private signMaterials: PBRMaterial[] = [];
+  private parcelDetails(b:Building,p:Parcel,w:number,h:number,d:number) {
+    const parts:Mesh[]=[];
+    const box=(name:string,x:number,y:number,z:number,bw:number,bh:number,bd:number,mat:PBRMaterial)=>{
+      const m=MeshBuilder.CreateBox(name,{width:bw,height:bh,depth:bd},this.scene);m.position.set(x,y,z);m.material=mat;parts.push(m);return m;
+    };
+    const pipe=(name:string,a:Vector3,c:Vector3,diameter:number)=>{
+      const delta=c.subtract(a),m=MeshBuilder.CreateCylinder(name,{height:delta.length(),diameter,tessellation:6},this.scene);
+      m.position.copyFrom(a.add(c).scale(.5));m.rotationQuaternion=Quaternion.FromUnitVectorsToRef(Vector3.Up(),delta.normalize(),new Quaternion());m.material=this.mats.metal;parts.push(m);
+    };
+    // 軒先の集水→縦樋→地面の集水桝。自由空間に浮く設備を置かない。
+    const z=d/2+.10;
+    box("site-drain-inlet",w/2-.18,.025,z+.43,.42,.05,.42,this.mats.darkMetal);
+    // GLBの軒・壁付設備はモデル固有の位置を保持する。外接箱を壁面とみなして重ねない。
+    // 手作り代替モデルのみ、寸法が既知の壁に設備を取り付ける。
+    if(!b.asset) {
+      const eave=h-.35;
+      pipe("eaves-gutter",new Vector3(-w/2,eave,z),new Vector3(w/2,eave,z),.12);
+      pipe("downpipe",new Vector3(w/2-.18,eave,z),new Vector3(w/2-.18,.16,z),.10);
+      pipe("drain-elbow",new Vector3(w/2-.18,.16,z),new Vector3(w/2-.18,.06,z+.45),.10);
+      box("wall-vent",-w/2-.05,2.3,-d*.22,.14,.45,.6,this.mats.darkMetal);
+      box("vent-hood",-w/2-.14,2.56,-d*.22,.33,.12,.75,this.mats.metal);
+    }
+    if(!b.asset&&(p.use==="shop"||p.use==="arcade"||p.use==="company")) {
+      box("entry-awning",0,2.7,d/2+.48,Math.min(w-1,6.8),.16,1.25,this.awnings[p.use==="arcade"?1:0]);
+      pipe("kitchen-exhaust",new Vector3(w/2+.18,2,-d/3),new Vector3(w/2+.18,Math.min(h+1,8),-d/3),.32);
+      box("exhaust-cap",w/2+.18,Math.min(h+1,8),-d/3,.65,.18,.65,this.mats.metal);
+      if(!this.signMaterials.length) {
+        for(const [label,bg] of [["ゲームセンター  AOBA","#254369"],["青葉企画  OFFICE","#e5e1d5"],["さくら商店","#80392b"]]) {
+          const tex=new DynamicTexture("neighborhood-sign",{width:512,height:96},this.scene,true),ctx=tex.getContext() as CanvasRenderingContext2D;
+          ctx.fillStyle=bg;ctx.fillRect(0,0,512,96);ctx.font="bold 37px sans-serif";ctx.textAlign="center";ctx.fillStyle=bg==="#e5e1d5"?"#273b45":"#fff4d7";ctx.fillText(label,256,61);tex.update();
+          const sm=new PBRMaterial("local-sign",this.scene);sm.albedoTexture=tex;sm.roughness=.8;this.signMaterials.push(sm);
+        }
+      }
+      const sm=this.signMaterials[p.use==="arcade"?0:p.use==="company"?1:2];
+      box("street-sign",0,3.35,d/2+.12,Math.min(w-.5,7),.9,.18,sm);
+    }
+    // 付属設備を建物単位・材質単位で結合し、近距離だけ表示する。
+    const merged=Mesh.MergeMeshes(parts,true,true,undefined,false,true);
+    if(merged){merged.parent=b.root;merged.isPickable=false;merged.receiveShadows=true;merged.addLODLevel(75,null);merged.freezeWorldMatrix();}
+    // 草は塀際・排水桝のそばに限定。舗装全面へランダム散布しない。
+    const tuft=MeshBuilder.CreateCylinder("wall-grass",{diameterBottom:.45,diameterTop:0,height:.38,tessellation:5},this.scene);
+    tuft.material=this.mats.grass;tuft.parent=b.root;tuft.position.set(w/2+.3,.19,d/2+.6);tuft.isPickable=false;tuft.addLODLevel(50,null);tuft.freezeWorldMatrix();
+  }
+
+  private groundAsset(id:string,x:number,y:number,z:number,yaw=0,scale?:Vector3,cast=false) {
+    const def=this.assets?.get(id);if(!def)return;
+    this.pending.push({id,x,y:y-def.states.normal!.min[1]*(scale?.y??1),z,yaw,parent:null,scale,cast,states:["normal","lod1","lod2"]});
+  }
+
+  private neighborhoodFurniture() {
+    const network=this.roads!,terrain=this.terrain!;
+    for(const street of network.streets) {
+      const wireMeshes:Mesh[]=[];
+      let previous:{x:number;y:number;z:number;dx:number;dz:number}|null=null;
+      for(let along=14;along<street.length-9;along+=street.kind==="main"?28:38) {
+        if(this.parcels.some(p=>p.streetId===street.id&&Math.abs(p.along-along)<4.3))continue;
+        const s=network.at(street,along),offset=street.width/2+street.sidewalk+.8;
+        const x=s.x+s.dz*offset,z=s.z-s.dx*offset;
+        if(!this.isOpen(x,z,1))continue;
+        const y=terrain.heightAt(x,z),yaw=Math.atan2(s.dx,s.dz);
+        if(street.kind!=="park") {
+          this.props.pole.add(Matrix.RotationY(yaw).multiply(Matrix.Translation(x,y,z)));
+          if(previous&&Math.hypot(x-previous.x,z-previous.z)<70) {
+            for(const side of [-.75,.75]) {
+              const a=new Vector3(previous.x+previous.dz*side,previous.y+9.2,previous.z-previous.dx*side);
+              const b=new Vector3(x+s.dz*side,y+9.2,z-s.dx*side);
+              wireMeshes.push(MeshBuilder.CreateTube("neighborhood-wire",{path:wirePath(a,b,.55,8),radius:.025,tessellation:3},this.scene));
+            }
+          }
+          previous={x,y,z,dx:s.dx,dz:s.dz};
+          this.groundAsset("infra_043",s.x+s.dz*(street.width/2-.2),s.y-.05,s.z-s.dx*(street.width/2-.2),yaw,new Vector3(.3,.18,.5));
+        }
+        // 縁石は中心線に沿う連続メッシュ。直線用の舗装箱を曲線へ重ねない。
+      }
+      if(wireMeshes.length) {
+        const merged=Mesh.MergeMeshes(wireMeshes,true,true)!;merged.material=this.props.wireMat;
+        merged.isPickable=false;merged.addLODLevel(140,null);merged.freezeWorldMatrix();
+      }
+    }
+    this.parcels.forEach((p,i)=>{
+      const street=network.streets.find(s=>s.id===p.streetId)!,s=network.at(street,p.along);
+      if(i%3===0) {
+        const side=Math.sign((p.x-s.x)*s.dz-(p.z-s.z)*s.dx),offset=side*(street.width/2-.15);
+        // 出入口の排水帯は格子蓋で渡す。切下げの高さ自体はTerrainと共有する。
+        this.groundAsset("infra_043",s.x+s.dz*offset,s.y-.05,s.z-s.dx*offset,Math.atan2(s.dx,s.dz),new Vector3(.18,.18,.85));
+      }
+      if(p.use==="parking") {
+        this.parcelCar(p,-3.6,-3.5);this.parcelCar(p,1.2,-3.5);
+        for(const x of [-3.6,-1.2,1.2,3.6]) {
+          const q=parcelWorld(p,x,-p.d/2+1);
+          this.groundAsset("infra_057",q.x,p.y,q.z,p.yaw,new Vector3(.55,.4,.35));
+        }
+      } else if(i%5===0&&p.use!=="shop"&&p.use!=="arcade")this.parcelCar(p);
+    });
+    // 緑道・団地の空地と背割り境界に低木・樹木をまとめ、通路と出入口を空ける。
+    const pilot=network.streets.length===8;
+    for(let i=0;i<(pilot?0:320);i++) {
+      const a=i*2.399963,rr=26+Math.sqrt(i/320)*171,x=Math.cos(a)*rr,z=Math.sin(a)*rr;
+      const near=network.nearest(x,z);
+      if(!near||near.distance<near.street.width/2+near.street.sidewalk+4||near.distance>55||!this.isOpen(x,z,3))continue;
+      if(this.parcels.some(p=>{const q=parcelLocal(p,x,z);return Math.abs(q.x)<p.w/2+2&&Math.abs(q.z)<p.d/2+2;}))continue;
+      const scale=.65+(i%5)*.12;
+      this.props.trees[i%2].add(Matrix.Scaling(scale,scale,scale).multiply(Matrix.Translation(x,terrain.heightAt(x,z),z)));
+    }
+    // 公園は3つの入口がある通り抜け空間。遊具・柵・樹木は通路から離す。
+    for(let i=0;i<24;i++) {
+      const a=i*2.399963,rr=10+(i%5)*3.4,x=-12+Math.cos(a)*rr,z=23+Math.sin(a)*rr;
+      const near=network.nearest(x,z);
+      if(!inCentralPark(x,z)||!near||near.distance<near.street.width/2+2||!this.isOpen(x,z,2))continue;
+      this.props.trees[i%2].add(Matrix.Scaling(.7,.7,.7).multiply(Matrix.Translation(x,terrain.heightAt(x,z),z)));
+    }
+    for(const [x,z,yaw] of [[-19,18,1.2],[4,35,-1.8],[-35,33,1.1]])this.groundAsset("prop_001",x,terrain.heightAt(x,z),z,yaw,undefined,true);
+    this.groundAsset("prop_010",2,terrain.heightAt(2,25),25);
+    this.groundAsset("prop_014",5,terrain.heightAt(5,29),29);
+    this.groundAsset("prop_021",-17,terrain.heightAt(-17,37),37);
+    for(const id of ["bend","parkEast","parkWest"]) {
+      const n=network.nodes[id];
+      this.groundAsset("infra_057",n[0]-2,n[1],n[2]+2,0,new Vector3(.45,.65,.45));
+    }
+    // 既存柵を公園外周に用いる。歩行者を通す3m以上の開口を残す。
+    for(const [i,x,z,yaw] of [[48,-34,8,.25],[49,-32,39,.9],[50,17,24,.25]]) {
+      const id="infra_0"+i,def=this.assets?.get(id);if(!def)continue;
+      const y=terrain.heightAt(x,z),f=this.footprint(def,0),B=new Builder(x,z);B.y=y;B.yaw=yaw;B.roofClutter=false;
+      B.solid(new Vector3(0,(f.h-f.minY)/2,0),new Vector3(f.w,f.h-f.minY,f.d));
+      const b=this.finish(B,"boundary",1e12);
+      this.pending.push({id,x:-f.lcx,y:-f.minY,z:-f.lcz,yaw:0,parent:b.root,states:["normal","lod1","lod2"]});
+    }
+  }
+
+  private parcelCar(p:Parcel,x=1.3,z=p.d/2-2.6) {
+    const cars=this.pools?.car;if(!cars?.length)return;
+    const def=cars[this.cars.length%Math.min(5,cars.length)],f=this.footprint(def,0),q=parcelWorld(p,x,z);
+    const h=f.h-f.minY,node=new TransformNode("parcel-car",this.scene);node.position.set(q.x,p.y+h/2+.06,q.z);node.rotationQuaternion=Quaternion.RotationYawPitchRoll(p.yaw,0,0);
+    const body=new PhysicsBody(node,PhysicsMotionType.DYNAMIC,true,this.scene),shape=new PhysicsShapeBox(Vector3.Zero(),Quaternion.Identity(),new Vector3(f.w,h,f.d),this.scene);
+    shape.filterMembershipMask=COL_STATIC;shape.filterCollideMask=COL_ALL;shape.material={friction:.9,restitution:.05};body.shape=shape;body.setMassProperties({mass:1100});body.setAngularDamping(.4);
+    this.cars.push({mesh:node,body});
+    this.pending.push({id:def.id,x:-f.lcx,y:-h/2-f.minY,z:-f.lcz,yaw:0,parent:node,cast:true,moving:true});
+  }
+
+  // ------------------------------------------------------------------ 旧版の地面・街区（比較用 ?layout=legacy）
   private buildGround() {
     const size = 1400;
     const ground = MeshBuilder.CreateGround("ground", { width: size, height: size, subdivisions: 2 }, this.scene);
@@ -1095,7 +1344,8 @@ export class City {
   /** Builder から建物を登録（メッシュの親子付け・当たり判定・物理ボディ） */
   private finish(B: Builder, kind: BuildingKind, hpOverride?: number): Building {
     const root = new TransformNode("bldRoot", this.scene);
-    root.position.set(B.cx, 0, B.cz);
+    root.position.set(B.cx, B.y, B.cz);
+    root.rotation.y = B.yaw;
     let hw = 0,
       hd = 0,
       height = 0,
@@ -1118,6 +1368,7 @@ export class City {
       hw,
       hd,
       height,
+      baseY: B.y,
       hp,
       maxHp: hp,
       state: "standing",
@@ -1126,12 +1377,16 @@ export class City {
     };
     if (B.roofClutter && kind !== "garage") this.addRoofClutter(B, kind);
     if (B.signs && height > 9) this.addSign(B, hw, hd, height);
+    if(kind==="boundary"&&B.meshes.length>1) {
+      const merged=Mesh.MergeMeshes(B.meshes,true,true);
+      if(merged)B.meshes=[merged];
+    }
     for (const t of B.thin) b.thin.push({ batch: t.batch, idx: t.batch.add(t.m) });
     for (const m of B.meshes) {
       m.parent = root;
       m.receiveShadows = true;
       m.isPickable = false;
-      this.shadowCasters.push(m);
+      if(kind!=="boundary")this.shadowCasters.push(m);
     }
     // 物理（1つのコンテナ形状にまとめる）
     const body = new PhysicsBody(root, PhysicsMotionType.STATIC, false, this.scene);
@@ -1139,13 +1394,18 @@ export class City {
     for (const s of B.boxes) {
       const shape = new PhysicsShapeBox(Vector3.Zero(), Quaternion.Identity(), s.s, this.scene);
       cont.addChild(shape, s.c);
+      const co = Math.cos(B.yaw), si = Math.sin(B.yaw);
+      const x = B.cx + s.c.x * co + s.c.z * si, z = B.cz - s.c.x * si + s.c.z * co;
+      const hw = Math.abs(co) * s.s.x / 2 + Math.abs(si) * s.s.z / 2;
+      const hd = Math.abs(si) * s.s.x / 2 + Math.abs(co) * s.s.z / 2;
       b.boxes.push({
-        minX: B.cx + s.c.x - s.s.x / 2,
-        maxX: B.cx + s.c.x + s.s.x / 2,
-        minY: s.c.y - s.s.y / 2,
-        maxY: s.c.y + s.s.y / 2,
-        minZ: B.cz + s.c.z - s.s.z / 2,
-        maxZ: B.cz + s.c.z + s.s.z / 2,
+        minX: x - hw,
+        maxX: x + hw,
+        minY: B.y + s.c.y - s.s.y / 2,
+        maxY: B.y + s.c.y + s.s.y / 2,
+        minZ: z - hd,
+        maxZ: z + hd,
+        oriented: { x, z, hw: s.s.x / 2, hd: s.s.z / 2, yaw: B.yaw },
         b,
       });
     }
@@ -1307,7 +1567,7 @@ export class City {
     const byMat = new Map<string, Mesh[]>();
     for (let k = 0; k < 90; k++) {
       const ang = (k / 90) * Math.PI * 2 + rand(-0.02, 0.02);
-      const dist = rand(CITY_HALF + 40, 520);
+      const dist = rand(250 + 40, 520);
       const style: FacadeStyle = Math.random() < 0.5 ? "glass" : "office";
       const spec = FACADE_SPECS[style];
       const w = Math.round(rand(16, 40) / (spec.tileW / 2)) * (spec.tileW / 2);
@@ -1377,7 +1637,7 @@ export class City {
 
   /**
    * 回転後の外接寸法と、モデル原点から外接箱の中心までのずれ（ワールドの向き）。
-   * Babylon では glTF の x が反転する（右手系 → 左手系）。yaw は 90 度単位を想定。
+   * Babylon では glTF の x が反転する（右手系 → 左手系）。任意の方位に対応する。
    */
   private footprint(def: AssetDef, yaw: number, st: AssetStateName = "normal") {
     const n = def.states[st] ?? def.states.normal!;
@@ -1389,10 +1649,8 @@ export class City {
       lcz = (minZ + maxZ) / 2,
       w = maxX - minX,
       d = maxZ - minZ;
-    const c = Math.round(Math.cos(yaw)),
-      s = Math.round(Math.sin(yaw));
-    const swap = Math.abs(s) === 1;
-    return { ww: swap ? d : w, dd: swap ? w : d, ox: lcx * c + lcz * s, oz: -lcx * s + lcz * c, lcx, lcz, h: n.max[1], minY: n.min[1] };
+    const c = Math.cos(yaw), s = Math.sin(yaw);
+    return { ww: Math.abs(c) * w + Math.abs(s) * d, dd: Math.abs(s) * w + Math.abs(c) * d, w, d, ox: lcx * c + lcz * s, oz: -lcx * s + lcz * c, lcx, lcz, h: n.max[1], minY: n.min[1] };
   }
 
   /** 区画（w×d、正面 front）に収まるモデルを選ぶ。大きく埋まるものほど選ばれやすい */
@@ -1493,7 +1751,7 @@ export class City {
     const tall = [...P.tower, ...P.mid];
     for (let k = 0; k < 110; k++) {
       const ang = (k / 110) * Math.PI * 2 + rand(-0.02, 0.02);
-      const dist = rand(CITY_HALF + 35, 470);
+      const dist = rand(250 + 35, 470);
       const def = pick(tall);
       const yaw = Math.round(rand(0, 4)) * (Math.PI / 2);
       this.pending.push({ id: def.id, x: Math.cos(ang) * dist, y: 0, z: Math.sin(ang) * dist, yaw, parent: null, states: ["lod2"] });
@@ -1668,9 +1926,23 @@ export class City {
     const A = this.assets;
     if (!A || !this.pending.length) return;
     await A.preload(new Set(this.pending.map((p) => p.id)), onProgress);
+    if(!this.legacy) {
+      // 小さなタイル目地は独自の繰返し模様。既存の窓・金属・ガラス材は維持する。
+      const texture=new DynamicTexture("residential-tiles",{width:256,height:256},this.scene,true),ctx=texture.getContext() as CanvasRenderingContext2D;
+      ctx.fillStyle="#59574f";ctx.fillRect(0,0,256,256);
+      for(let row=0;row<16;row++)for(let col=-1;col<8;col++) {
+        const shade=(row*13+col*7)%3;ctx.fillStyle=["#b8a88a","#b2a286","#c0b096"][(shade+3)%3];
+        ctx.fillRect(col*32+(row%2)*16+1,row*16+1,30,14);
+      }
+      texture.update();const material=new PBRMaterial("neighborhood-tile-cladding",this.scene);
+      material.albedoTexture=texture;material.roughness=.9;material.metallic=0;material.freeze();
+      A.replaceSurface("building_042",["PBR_cream","PBR_white"],material);
+    }
     for (const q of this.pending) {
       const p = A.place(q.id, q.x, q.y, q.z, q.yaw, q.parent, q.states);
       if (!p) continue;
+      if (q.scale) p.root.scaling.copyFrom(q.scale);
+      if(!this.legacy) {p.near=28+p.radius;p.far=85+p.radius*2;}
       if (q.moving) p.isStatic = false;
       if (q.cast) for (const m of p.meshes) this.shadowCasters.push(m as unknown as Mesh);
     }
@@ -1726,17 +1998,33 @@ export class City {
    */
   heightAt(x: number, z: number, fromY = Infinity): number {
     const list = this.query(x, z, x, z, this.tmp);
-    let h = this.sidewalkAt(x, z) ? SIDEWALK_H : 0;
+    let h = this.terrain ? this.terrain.heightAt(x, z, fromY) : this.sidewalkAt(x, z) ? SIDEWALK_H : 0;
     const lim = fromY + STEP_UP;
     for (const b of list) {
-      if (x < b.minX || x > b.maxX || z < b.minZ || z > b.maxZ) continue;
+      if (!this.boxContains(b, x, z)) continue;
       if (b.maxY <= lim && b.maxY > h) h = b.maxY;
     }
     return h;
   }
 
   sidewalkAt(x: number, z: number) {
+    if (this.roads) {
+      const p = this.roads.nearest(x,z);
+      return !!p && p.street.sidewalk > 0 && p.distance > p.street.width/2 && p.distance < p.street.width/2+p.street.sidewalk;
+    }
     return this.blockAt(x, z) !== null;
+  }
+
+  private boxLocal(b: Box, x: number, z: number) {
+    const o=b.oriented;
+    if(!o)return {x,z,minX:b.minX,maxX:b.maxX,minZ:b.minZ,maxZ:b.maxZ,c:1,s:0};
+    const c=Math.cos(o.yaw),s=Math.sin(o.yaw),dx=x-o.x,dz=z-o.z;
+    return {x:dx*c-dz*s,z:dx*s+dz*c,minX:-o.hw,maxX:o.hw,minZ:-o.hd,maxZ:o.hd,c,s};
+  }
+
+  private boxContains(b: Box,x:number,z:number,padding=0) {
+    const p=this.boxLocal(b,x,z);
+    return p.x>=p.minX-padding&&p.x<=p.maxX+padding&&p.z>=p.minZ-padding&&p.z<=p.maxZ+padding;
   }
 
   /**
@@ -1748,24 +2036,26 @@ export class City {
     let hit = false;
     for (const b of list) {
       if (b.maxY <= pos.y + STEP_UP || b.minY >= pos.y + height) continue;
-      const qx = Math.max(b.minX, Math.min(pos.x, b.maxX));
-      const qz = Math.max(b.minZ, Math.min(pos.z, b.maxZ));
-      const dx = pos.x - qx,
-        dz = pos.z - qz;
+      const local=this.boxLocal(b,pos.x,pos.z);
+      const qx = Math.max(local.minX, Math.min(local.x, local.maxX));
+      const qz = Math.max(local.minZ, Math.min(local.z, local.maxZ));
+      const dx = local.x - qx, dz = local.z - qz;
       const d2 = dx * dx + dz * dz;
       if (d2 > r * r) continue;
       if (d2 > 1e-8) {
         const d = Math.sqrt(d2);
-        pos.x = qx + (dx / d) * r;
-        pos.z = qz + (dz / d) * r;
+        local.x = qx + (dx / d) * r;
+        local.z = qz + (dz / d) * r;
       } else {
-        const pen = [pos.x - b.minX, b.maxX - pos.x, pos.z - b.minZ, b.maxZ - pos.z];
+        const pen = [local.x - local.minX, local.maxX - local.x, local.z - local.minZ, local.maxZ - local.z];
         const m = Math.min(...pen);
-        if (m === pen[0]) pos.x = b.minX - r;
-        else if (m === pen[1]) pos.x = b.maxX + r;
-        else if (m === pen[2]) pos.z = b.minZ - r;
-        else pos.z = b.maxZ + r;
+        if (m === pen[0]) local.x = local.minX - r;
+        else if (m === pen[1]) local.x = local.maxX + r;
+        else if (m === pen[2]) local.z = local.minZ - r;
+        else local.z = local.maxZ + r;
       }
+      pos.x=(b.oriented?.x??0)+local.x*local.c+local.z*local.s;
+      pos.z=(b.oriented?.z??0)-local.x*local.s+local.z*local.c;
       hit = true;
     }
     return hit;
@@ -1773,8 +2063,9 @@ export class City {
 
   /** レイと地面・建物の交差。最も近いものを返す */
   raycast(origin: Vector3, dir: Vector3, maxDist: number): RayHit | null {
-    let best: RayHit | null = null;
-    if (dir.y < -1e-6) {
+    const ground = this.terrain?.raycast(origin, dir, maxDist);
+    let best: RayHit | null = ground ? { ...ground, building: null } : null;
+    if (!this.terrain && dir.y < -1e-6) {
       const t = -origin.y / dir.y;
       if (t >= 0 && t <= maxDist) best = { dist: t, point: origin.add(dir.scale(t)), normal: Vector3.Up(), building: null };
     }
@@ -1800,10 +2091,11 @@ export class City {
   }
 
   private rayBox(o: Vector3, d: Vector3, b: Box): { t: number; n: Vector3 } | null {
-    const min = [b.minX, b.minY, b.minZ];
-    const max = [b.maxX, b.maxY, b.maxZ];
-    const oo = [o.x, o.y, o.z];
-    const dd = [d.x, d.y, d.z];
+    const p=this.boxLocal(b,o.x,o.z);
+    const min = [p.minX, b.minY, p.minZ];
+    const max = [p.maxX, b.maxY, p.maxZ];
+    const oo = [p.x, o.y, p.z];
+    const dd = [d.x*p.c-d.z*p.s, d.y, d.x*p.s+d.z*p.c];
     let tmin = 0,
       tmax = Infinity,
       axis = -1,
@@ -1830,7 +2122,8 @@ export class City {
       if (tmin > tmax) return null;
     }
     if (axis < 0) return { t: 0, n: d.scale(-1) };
-    return { t: tmin, n: new Vector3(axis === 0 ? sign : 0, axis === 1 ? sign : 0, axis === 2 ? sign : 0) };
+    const nx=axis===0?sign:0,nz=axis===2?sign:0;
+    return { t: tmin, n: new Vector3(nx*p.c+nz*p.s, axis===1?sign:0, -nx*p.s+nz*p.c) };
   }
 
   // ------------------------------------------------------------------ 破壊
@@ -1846,10 +2139,11 @@ export class City {
     const done = new Set<Building>();
     for (const box of list) {
       if (done.has(box.b)) continue;
-      const qx = Math.max(box.minX, Math.min(center.x, box.maxX));
+      const local=this.boxLocal(box,center.x,center.z);
+      const qx = Math.max(local.minX, Math.min(local.x, local.maxX));
       const qy = Math.max(box.minY, Math.min(center.y, box.maxY));
-      const qz = Math.max(box.minZ, Math.min(center.z, box.maxZ));
-      const d = Math.hypot(center.x - qx, center.y - qy, center.z - qz);
+      const qz = Math.max(local.minZ, Math.min(local.z, local.maxZ));
+      const d = Math.hypot(local.x - qx, center.y - qy, local.z - qz);
       if (d < radius) {
         done.add(box.b);
         this.damageBuilding(box.b, dmg * (1 - (d / radius) * 0.5));
@@ -1877,7 +2171,7 @@ export class City {
       const dur = 1.6 + b.height * 0.012;
       const k = Math.min(1, b.collapseT / dur);
       const sink = b.height * k * k * 1.05;
-      b.root.position.y = -sink;
+      b.root.position.y = b.baseY - sink;
       const shake = (1 - k) * 0.4;
       const sx = (Math.random() - 0.5) * shake,
         sz = (Math.random() - 0.5) * shake;
@@ -1913,7 +2207,7 @@ export class City {
           this.scene,
         );
         rub.scaling.z = b.hd / Math.max(0.1, b.hw);
-        rub.position.set(b.cx, 0.6, b.cz);
+        rub.position.set(b.cx, b.baseY + 0.6, b.cz);
         rub.rotation.y = Math.random() * Math.PI;
         rub.material = this.mats.rubble;
         rub.receiveShadows = true;
@@ -1924,7 +2218,7 @@ export class City {
   }
 
   clampToMap(p: Vector3, margin = 2) {
-    const lim = CITY_HALF - margin;
+    const lim = (this.legacy ? 250 : CITY_HALF) - margin;
     p.x = Math.max(-lim, Math.min(lim, p.x));
     p.z = Math.max(-lim, Math.min(lim, p.z));
   }
@@ -1932,7 +2226,7 @@ export class City {
   /** 開けた地面の上の位置か（建物の中ではない） */
   isOpen(x: number, z: number, r = 2): boolean {
     const list = this.query(x - r, z - r, x + r, z + r, this.tmp);
-    for (const b of list) if (x > b.minX - r && x < b.maxX + r && z > b.minZ - r && z < b.maxZ + r) return false;
+    for (const b of list) if (this.boxContains(b,x,z,r)) return false;
     return true;
   }
 }

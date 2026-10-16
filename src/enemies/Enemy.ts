@@ -324,7 +324,7 @@ export abstract class GroundEnemy extends Enemy {
     p.addInPlace(this.vel.scale(dt));
     this.roll += this.spinRate * dt;
     this.ctx.city.clampToMap(p, 4);
-    const g = this.ctx.city.heightAt(p.x, p.z);
+    const g = this.ctx.city.heightAt(p.x, p.z, p.y + Math.max(0, -this.vel.y * dt));
     if (p.y <= g && this.vel.y < 0) {
       p.y = g;
       this.airborne = false;

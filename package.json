@@ -8,6 +8,10 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
     "typecheck": "tsc --noEmit",
+    "test:neighborhood": "node scripts/test-neighborhood.mjs",
+    "benchmark:neighborhood": "node scripts/benchmark-neighborhood.mjs",
+    "capture:neighborhood": "node scripts/capture-neighborhood.mjs",
+    "pack:neighborhood": "node scripts/pack-neighborhood-assets.mjs",
     "fetch-assets": "node scripts/fetch-assets.mjs",
     "autoplay": "node scripts/autoplay.mjs",
     "import-assets": "python3 scripts/import_assets.py library && node scripts/build_packs.mjs"

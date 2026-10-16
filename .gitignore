@@ -5,3 +5,5 @@ dist/
 *.zip
 *.bundle
 .asset-work/
+# 実ブラウザ検証のPNG・ログ。コードと検証スクリプトは追跡し、成果はPCとLibraryへ保持。
+artifacts/

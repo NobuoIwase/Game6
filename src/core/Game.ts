@@ -179,35 +179,36 @@ export class Game implements GameContext {
     const mats = await createCityMaterials(scene);
     // 外部アセット（GLB）の台帳。無ければ従来の手作りの街になる
     this.assets = new AssetLibrary(scene);
-    await this.assets.loadCatalog();
+    await this.assets.loadCatalog(new URLSearchParams(location.search).get("layout") !== "legacy");
     this.city = new City(scene, mats, this.assets);
     this.city.build();
     this.progress(0.45, "建物・車・街路のモデルを読み込み中...");
     await this.city.realizeAssets((d, t) => this.progress(0.45 + (d / t) * 0.14, `建物・車・街路のモデルを読み込み中... (${d}/${t})`));
     this.city.onCollapseStart = (b) => {
       // 建物が爆発して崩れ落ちる（見た目だけの爆発を時間差で連続させる）
-      const center = new Vector3(b.cx, b.height / 2, b.cz);
+      const center = new Vector3(b.cx, b.baseY + b.height / 2, b.cz);
       const n = this.quality.level === "low" ? 3 : 6;
       for (let i = 0; i < n; i++) {
-        const p = new Vector3(b.cx + rand(-b.hw, b.hw), rand(0.2, 1) * b.height, b.cz + rand(-b.hd, b.hd));
+        const p = new Vector3(b.cx + rand(-b.hw, b.hw), b.baseY + rand(0.2, 1) * b.height, b.cz + rand(-b.hd, b.hd));
         this.later(i * 0.18, () => {
           this.effects.explosion(p, Math.min(14, 5 + Math.max(b.hw, b.hd) * 0.4), false);
           sfx.explosion(p, 1.2);
         });
       }
-      this.effects.collapseDust(b.cx, b.cz, b.hw, b.hd, 1.5);
+      this.effects.collapseDust(b.cx, b.cz, b.hw, b.hd, 1.5, b.baseY);
       this.effects.addShake(Math.max(0, 0.6 - Vector3.Distance(this.player.position, center) / 250));
       sfx.collapse(center);
-      this.spawnDebris(b.cx, b.height * 0.6, b.cz, Math.max(b.hw, b.hd));
+      this.spawnDebris(b.cx, b.baseY + b.height * 0.6, b.cz, Math.max(b.hw, b.hd));
     };
-    this.city.onCollapseEnd = (b) => this.effects.collapseDust(b.cx, b.cz, b.hw, b.hd, 0.8);
+    this.city.onCollapseEnd = (b) => this.effects.collapseDust(b.cx, b.cz, b.hw, b.hd, 0.8, b.baseY);
 
     // ---- システム ----
     this.progress(0.6, "部隊を展開中...");
     this.effects = new Effects(scene, q.particleScale);
     this.projectiles = new Projectiles(this);
     this.enemies = new EnemyManager(this);
-    const start = new Vector3(this.opts.mission.playerStart[0], 0.12, this.opts.mission.playerStart[1]);
+    const start = new Vector3(this.opts.mission.playerStart[0], 0, this.opts.mission.playerStart[1]);
+    start.y = this.city.heightAt(start.x, start.z);
     this.player = new Player(this, this.opts.loadout, this.difficulty.playerArmor, start);
     this.camYaw = Math.PI; // 最初は北（-Z）を向く
     this.pickups = new Pickups(scene, (x, z, y) => this.city.heightAt(x, z, y));
@@ -289,7 +290,7 @@ export class Game implements GameContext {
     const sm = this.shadowGen?.getShadowMap();
     if (!sm) return;
     const p = this.player?.position ?? Vector3.Zero();
-    const r = this.quality.level === "high" ? 260 : 150;
+    const r = this.city.legacy ? (this.quality.level === "high" ? 260 : 150) : (this.quality.level === "high" ? 180 : 95);
     const list = [...this.alwaysCasters];
     for (const m of this.nearCasters) {
       if (m.isDisposed()) continue;
@@ -715,7 +716,8 @@ export class Game implements GameContext {
     // 建物にめり込まないように
     const hit = this.city.segment(focus, desired);
     if (hit) desired = focus.add(desired.subtract(focus).normalize().scale(Math.max(0.3, hit.dist - 0.3)));
-    if (desired.y < 0.3) desired.y = 0.3;
+    const cameraFloor = this.city.terrain?.heightAt(desired.x, desired.z) ?? 0;
+    if (desired.y < cameraFloor + 0.3) desired.y = cameraFloor + 0.3;
     // 画面の揺れ
     const s = this.effects.shake;
     if (s > 0) desired.addInPlace(new Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).scale(s * 0.25));

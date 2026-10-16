@@ -114,12 +114,22 @@ export class AssetLibrary {
   ) {}
 
   /** 台帳を読む（無ければ空のまま。ゲームは従来の手作りの街で動く） */
-  async loadCatalog(): Promise<boolean> {
+  async loadCatalog(includeNeighborhood = true): Promise<boolean> {
     try {
       const res = await fetch(this.base + "catalog.json");
       if (!res.ok) return false;
       const data = (await res.json()) as { assets: AssetDef[] };
       this.defs = data.assets;
+      if (includeNeighborhood) {
+        try {
+          const extra = await fetch(this.base + "neighborhood-catalog.json");
+          if (extra.ok) {
+            const additions = (await extra.json()) as { assets: AssetDef[] };
+            const existing = new Set(this.defs.map(d => d.id));
+            this.defs.push(...additions.assets.filter(d => !existing.has(d.id)));
+          }
+        } catch { /* 追加パックが未配備でも既存catalogは使用する */ }
+      }
     } catch {
       return false;
     }
@@ -142,6 +152,15 @@ export class AssetLibrary {
 
   get(id: string) {
     return this.byId.get(id);
+  }
+
+  /** 指定モデルだけの外壁材を共有材質へ差し替える。元のcatalog・他モデルは変更しない。 */
+  replaceSurface(id:string,sourceNames:string[],material:PBRMaterial) {
+    for(const state of ["normal","lod1","lod2","wreck"]) {
+      const root=this.templates.get(`${id}|${state}`);
+      if(!root)continue;
+      for(const mesh of root.getChildMeshes(false))if(mesh.material&&sourceNames.includes(mesh.material.name))mesh.material=material;
+    }
   }
 
   /** 指定したアセットを含むパックを読み込む（同時に読み込みすぎないよう 3 本ずつ） */

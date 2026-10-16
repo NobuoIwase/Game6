@@ -157,7 +157,14 @@ export class EnemyManager {
     if (this.list.some((e) => !e.alive)) this.list = this.list.filter((e) => e.alive);
     for (const sq of this.squads) sq.members = sq.members.filter((m) => m.alive);
     this.squads = this.squads.filter((s) => s.members.length > 0);
-    for (const e of this.list) e.updateHitSpheres();
+    for (const e of this.list) {
+      // 分離でXZを押した後も坂へ接地する。登攀・空中の動作は保持する。
+      if(e instanceof GroundEnemy&&!e.airborne&&e.climbing===0) {
+        const h=this.ctx.city.heightAt(e.position.x,e.position.z,e.position.y);
+        if(Math.abs(h-e.position.y)<.6)e.position.y=h;
+      }
+      e.updateHitSpheres();
+    }
   }
 
   /** 地上の敵同士が重ならないよう押し離す（簡易空間ハッシュ） */
