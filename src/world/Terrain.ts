@@ -3,7 +3,7 @@ import { COL_ALL, COL_STATIC } from "../core/Physics";
 import type { RoadPoint } from "../data/neighborhood";
 import { RoadNetwork, parcelLocal, type Parcel } from "./RoadNetwork";
 
-export type SurfaceKind = "grass" | "road" | "sidewalk" | "path" | "gravel" | "marking" | "drain";
+export type SurfaceKind = "grass" | "soil" | "road" | "sidewalk" | "path" | "gravel" | "marking" | "drain";
 interface Triangle { a: RoadPoint; b: RoadPoint; c: RoadPoint; normal: Vector3; den: number; kind: SurfaceKind; base: boolean }
 
 // 描画・高さ・射線・Havokへ同一の三角形を渡す。y=0の隠れた衝突平面は置かない。
@@ -23,6 +23,11 @@ export class Terrain {
     }
     const road=this.network.nearest(x,z);
     if(road&&road.distance<road.street.width/2+road.street.sidewalk+.3)h=Math.min(h,road.y-.09);
+    // 敷地前の舗装・切下げの下へ地盤を納める。粗い地形格子が入口から突き出さない。
+    if(road)for(const p of this.parcels)if(p.refined&&p.streetId===road.street.id) {
+      const q=parcelLocal(p,x,z);
+      if(Math.abs(q.x)<p.w/2+.5&&q.z>p.d/2-.4&&q.z<p.d/2+road.street.sidewalk+p.setback+1)h=Math.min(h,road.y-.09);
+    }
     return h;
   }
 

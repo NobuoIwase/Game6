@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 const pilot=process.argv.includes('--pilot');
-const out=path.resolve('artifacts/neighborhood/'+(pilot?'pilot-tests':'tests'));
+const out=path.resolve(process.env.NEIGHBORHOOD_TEST_OUT||'artifacts/neighborhood/'+(pilot?'pilot-tests':'tests'));
 await fs.mkdir(out,{recursive:true});
 const server=await createServer({logLevel:'error',server:{host:'127.0.0.1',port:0,hmr:false,watch:{ignored:['**/*']}}});
 await server.listen();
@@ -93,11 +93,31 @@ try {
       check('walk-park-detour',walks.detour.reached&&walks.detour.maxGap<.35,walks.detour);
       const streetWalks=roads.streets.map(s=>({street:s.id,...follow({streets:[s.id]},s.from)}));
       check('every-road-and-alley-is-traversable',streetWalks.every(w=>w.reached&&w.maxVerticalStep<.45),streetWalks);
+      const communityWalks=[];
+      for(const space of city.communitySpaces??[])for(const [index,path] of space.paths.entries()) {
+        reset(path[0][0],path[0][2]);let reached=true,maxStep=0,steps=0;
+        for(let j=1;j<path.length;j++) {
+          const a=path[j-1],b=path[j],count=Math.ceil(Math.hypot(b[0]-a[0],b[2]-a[2])/2);
+          for(let k=1;k<=count;k++) {
+            const x=a[0]+(b[0]-a[0])*k/count,z=a[2]+(b[2]-a[2])*k/count;let guard=0;
+            while(Math.hypot(x-g.player.position.x,z-g.player.position.z)>.3&&guard++<160) {
+              const old=g.player.position.y;g.camYaw=Math.atan2(x-g.player.position.x,z-g.player.position.z);step({moveY:.8});steps++;
+              maxStep=Math.max(maxStep,Math.abs(g.player.position.y-old));
+            }
+            if(guard>=160){reached=false;break;}
+          }
+          if(!reached)break;
+        }
+        communityWalks.push({space:space.id,index,reached,maxStep,steps});
+      }
+      const spaces=city.communitySpaces??[];
+      check('community-spaces-connect-and-can-be-walked',communityWalks.every(w=>w.reached&&w.maxStep<.45)&&spaces.every(s=>s.paths.length===2&&Math.hypot(s.paths[0].at(-1)[0]-s.paths[1].at(-1)[0],s.paths[0].at(-1)[2]-s.paths[1].at(-1)[2])>12)&&(roads.streets.length===8||spaces.length===4),communityWalks);
       const entrances=[];
       for(const p of city.parcels.filter((p,i)=>i%13===0||p.use==='parking')) {
         const road=roads.streets.find(r=>r.id===p.streetId),s=roads.at(road,p.along),c=Math.cos(p.yaw),sn=Math.sin(p.yaw);
-        const target={x:p.x-1.35*c+(p.d/2-.8)*sn,z:p.z+1.35*sn+(p.d/2-.8)*c};
-        reset(s.x-1.35*c,s.z+1.35*sn);let guard=0,maxStep=0;
+        const ex=p.refined?0:-1.35;
+        const target={x:p.x+ex*c+(p.d/2-.8)*sn,z:p.z-ex*sn+(p.d/2-.8)*c};
+        reset(s.x+ex*c,s.z-ex*sn);let guard=0,maxStep=0;
         while(Math.hypot(target.x-g.player.position.x,target.z-g.player.position.z)>.2&&guard++<240) {
           const old=g.player.position.y;g.camYaw=Math.atan2(target.x-g.player.position.x,target.z-g.player.position.z);step({moveY:.7});
           maxStep=Math.max(maxStep,Math.abs(g.player.position.y-old));
@@ -105,6 +125,26 @@ try {
         entrances.push({parcel:p.id,use:p.use,reached:guard<240,maxStep});
       }
       check('curb-cuts-and-parking-entrances',entrances.every(e=>e.reached&&e.maxStep<.45),entrances);
+      // 車輪位置の3本の断面を5cm間隔で計測。プレイヤーの60cm段差許容では判定しない。
+      const vehicleEntrances=[];
+      for(const p of city.parcels.filter(p=>p.refined&&p.hasParking)) {
+        const road=roads.streets.find(s=>s.id===p.streetId),c=Math.cos(p.yaw),sn=Math.sin(p.yaw);
+        let maxStep=0,maxPhysicsError=0;
+        for(const lx of [-1,0,1]) {
+          const s=roads.at(road,p.along+lx*p.side),r=road.width/2;
+          const a={x:s.x+s.dz*p.side*r,z:s.z-s.dx*p.side*r},b={x:p.x+lx*c+p.d/2*sn,z:p.z-lx*sn+p.d/2*c};
+          const length=Math.hypot(b.x-a.x,b.z-a.z),steps=Math.ceil((length+.3)/.05);
+          let previous=null;
+          for(let i=0;i<=steps;i++) {
+            const t=(-.15+(length+.3)*i/steps)/length,x=a.x+(b.x-a.x)*t,z=a.z+(b.z-a.z)*t,h=city.terrain.heightAt(x,z);
+            if(previous!==null)maxStep=Math.max(maxStep,Math.abs(h-previous));previous=h;
+            const physics=pe.raycast(new V(x,h+.06,z),new V(x,h-.12,z));
+            maxPhysicsError=Math.max(maxPhysicsError,physics.hasHit?Math.abs(physics.hitPointWorld.y-h):999);
+          }
+        }
+        vehicleEntrances.push({parcel:p.id,width:p.entryWidth,maxStep,maxPhysicsError});
+      }
+      check('vehicle-wheel-tracks-have-no-curb-lip',vehicleEntrances.every(e=>e.width>=3.4&&e.maxStep<.015&&e.maxPhysicsError<.02)&&(roads.streets.length===8||vehicleEntrances.length>0),vehicleEntrances);
       const apt=city.buildings.find(b=>b.asset?.id==='tokyo_small_apartment_001');
       if(apt) {
         const a=apt.asset,c=Math.cos(a.yaw),s=Math.sin(a.yaw),world=(x,z)=>({x:a.x+x*c+z*s,z:a.z-x*s+z*c});

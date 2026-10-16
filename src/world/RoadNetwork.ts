@@ -3,7 +3,7 @@ import { NODES, DISTRICT_NODES, PILOT_STREETS, DISTRICT_STREETS, type RoadPoint,
 export interface RoadSample { x: number; y: number; z: number; dx: number; dz: number; distance: number }
 export interface Street extends StreetDef { samples: RoadSample[]; length: number }
 export interface RoadProjection { street: Street; x: number; y: number; z: number; distance: number; along: number; dx: number; dz: number }
-export interface Parcel { id: string; x: number; z: number; y: number; yaw: number; w: number; d: number; assetId: string; use: "house" | "apartment" | "estate" | "company" | "shop" | "arcade" | "parking"; streetId: string; along: number }
+export interface Parcel { id: string; x: number; z: number; y: number; yaw: number; w: number; d: number; assetId: string; use: "house" | "apartment" | "estate" | "company" | "shop" | "arcade" | "parking"; streetId: string; along: number; side: number; refined: boolean; front: number; back: number; bodyZ: number; setback: number; entryWidth: number; hasParking: boolean }
 
 const clamp = (x: number, a: number, b: number) => Math.max(a, Math.min(b, x));
 const cubic = (a: number, b: number, c: number, d: number, t: number) => .5 * ((2*b) + (-a+c)*t + (2*a-5*b+4*c-d)*t*t + (-a+3*b-3*c+d)*t*t*t);

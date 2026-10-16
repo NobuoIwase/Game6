@@ -47,6 +47,8 @@ export class Placement {
   /** LOD を切り替える距離（m） */
   near = 60;
   far = 180;
+  /** 小さな非衝突設備だけに指定する表示上限。建物・破壊物は既定で無制限。 */
+  maxDistance = Infinity;
   /** wreck に固定（倒壊後） */
   wrecked = false;
   /** 動かないもの（行列を固定して軽くする） */
@@ -266,6 +268,10 @@ export class AssetLibrary {
       if (p.root.isDisposed()) continue;
       const w = p.root.getAbsolutePosition();
       const d = Math.hypot(w.x - camPos.x, w.y - camPos.y, w.z - camPos.z) - p.radius;
+      if(Number.isFinite(p.maxDistance)) {
+        p.root.setEnabled(d<p.maxDistance);
+        if(d>=p.maxDistance)continue;
+      }
       p.show(p.pick(d));
     }
   }

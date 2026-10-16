@@ -76,3 +76,11 @@ export const BUILDING_PALETTES = {
   company: ["building_056", "building_067", "building_066"],
   shop: ["shop_015", "shop_020", "shop_031", "shop_036", "shop_039", "shop_041", "shop_054"],
 };
+
+// 沿道住宅の背後に残る土地も、境界と接続路を持つ共同利用地にする。
+export const COMMUNITY_SPACES = [
+  {id:"west-garden",x:-98,z:88,w:40,d:30,use:"garden"},
+  {id:"south-playcourt",x:46,z:-112,w:32,d:26,use:"court"},
+  {id:"east-rest-garden",x:142,z:32,w:24,d:20,use:"rest"},
+  {id:"greenway-court",x:46,z:80,w:18,d:16,use:"rest"},
+] as const;

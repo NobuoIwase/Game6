@@ -39,6 +39,7 @@ import { NEIGHBORHOOD_HALF } from "../data/neighborhood";
 import { RoadNetwork, parcelWorld, parcelLocal, type Parcel } from "./RoadNetwork";
 import { makeParcels, makeTerrain, inCentralPark } from "./NeighborhoodPlan";
 import type { Terrain } from "./Terrain";
+import { makeCommunitySpaces, distanceToCommunityPaths, type CommunitySpace } from "./CommunitySpaces";
 
 /** realizeAssets() で置くモデルの予約 */
 interface PendingPlace {
@@ -281,8 +282,10 @@ export class City {
   private buildNeighborhood() {
     const pilot = typeof location !== "undefined" && new URLSearchParams(location.search).get("district") === "pilot";
     this.roads = new RoadNetwork(pilot);
-    this.parcels = makeParcels(this.roads, this.assets?.defs ?? [], pilot);
-    this.terrain = makeTerrain(this.roads, this.parcels);
+    const mode=new URLSearchParams(location.search).get("streetscape")??"full";
+    this.parcels = makeParcels(this.roads, this.assets?.defs ?? [], pilot,mode);
+    this.communitySpaces=!pilot&&mode==="full"?makeCommunitySpaces(this.roads,this.parcels):[];
+    this.terrain = makeTerrain(this.roads, this.parcels,this.communitySpaces);
     if (this.assets) this.buildPools();
     const path = this.mats.plaza.clone("parkPath")!;
     path.albedoColor = new Color3(.68,.61,.48);
@@ -290,11 +293,25 @@ export class City {
     gravel.albedoColor = new Color3(.72,.72,.68);
     const grass = this.mats.grass.clone("neighborhoodGrass")!;
     grass.albedoColor = new Color3(.55,.86,.42);
-    this.terrain.buildMeshes(this.scene,{grass,road:this.mats.road,sidewalk:this.mats.sidewalk,path,gravel,marking:this.mats.marking,drain:this.mats.darkMetal});
+    const soil=new PBRMaterial("community-soil",this.scene);soil.albedoColor=new Color3(.42,.31,.20);soil.roughness=1;
+    const dirt=new DynamicTexture("garden-earth",{width:128,height:128},this.scene,false),dc=dirt.getContext();
+    dc.fillStyle="#8c7659";dc.fillRect(0,0,128,128);
+    for(let i=0;i<1800;i++){dc.fillStyle=i%2?"#968266":"#79674f";dc.fillRect((i*47)%128,(i*71+Math.floor(i/128)*17)%128,2,1);}
+    dirt.update();soil.albedoTexture=dirt;
+    this.terrain.buildMeshes(this.scene,{grass,soil,road:this.mats.road,sidewalk:this.mats.sidewalk,path,gravel,marking:this.mats.marking,drain:this.mats.darkMetal});
     for(const p of this.parcels) {
       this.placeParcel(p);
       // GLBの有無に関わらず、各敷地の境界・入口・設備を生成する。
       this.parcelBoundary(p);
+    }
+    // 塀は区画タイル単位で描画をまとめる。個別のOBB・Havokボディは保持する。
+    const walls=new Map<string,Mesh[]>();
+    for(const b of this.buildings)if(b.kind==="boundary")for(const m of b.root.getChildMeshes(false))if(m instanceof Mesh) {
+      const key=Math.floor(b.cx/96)+","+Math.floor(b.cz/96),list=walls.get(key)??[];m.computeWorldMatrix(true);list.push(m);walls.set(key,list);
+    }
+    for(const list of walls.values()) {
+      const mesh=Mesh.MergeMeshes(list,true,true);if(!mesh)continue;
+      mesh.name="parcel-walls";mesh.isPickable=false;mesh.receiveShadows=true;mesh.freezeWorldMatrix();
     }
     this.neighborhoodFurniture();
     for(const batch of this.props.all)batch.build();
@@ -302,11 +319,13 @@ export class City {
     for(const batch of [...this.props.trees,this.props.pole])if(batch.count)this.shadowCasters.push(batch.mesh);
   }
 
+  communitySpaces: CommunitySpace[] = [];
+
   private placeParcel(p: Parcel) {
     if(p.use==="parking")return;
     const def = this.assets?.get(p.assetId), f = def ? this.footprint(def,0) : null;
     const w=f?.w??8,d=f?.d??9,h=f?f.h-f.minY:7;
-    const center=parcelWorld(p,0,-1.5),B=new Builder(center.x,center.z);
+    const center=parcelWorld(p,0,p.bodyZ),B=new Builder(center.x,center.z);
     B.y=p.y;B.yaw=p.yaw;B.roofClutter=false;
     if(def?.id==="tokyo_arcade_001"&&f) {
       // 庇の下と約2.2mの奥まった入口を開ける。上階は外壁と床の固体として扱う。
@@ -358,8 +377,8 @@ export class City {
     wall(0,-p.d/2+.1,p.w,.85,.2);
     for(const side of [-1,1]) {
       wall(side*(p.w/2-.1),-.7,.2,.85,p.d-1.4);
-      const len=Math.max(0,p.w/2-2.9);
-      if(len>.25)wall(side*(2.9+len/2),p.d/2-.1,len,.75,.2);
+      const opening=p.entryWidth/2+.15,len=Math.max(0,p.w/2-opening);
+      if(len>.25)wall(side*(opening+len/2),p.d/2-.1,len,.75,.2);
     }
     this.finish(B,"boundary",1e12);
     // 擁壁は後背地との段差がある敷地だけ。排水孔が地表を向く。
@@ -460,11 +479,54 @@ export class City {
           const q=parcelWorld(p,x,-p.d/2+1);
           this.groundAsset("infra_057",q.x,p.y,q.z,p.yaw,new Vector3(.55,.4,.35));
         }
-      } else if(i%5===0&&p.use!=="shop"&&p.use!=="arcade")this.parcelCar(p);
+      } else if(p.refined?p.hasParking&&i%3===0:i%5===0&&p.use!=="shop"&&p.use!=="arcade")this.parcelCar(p,p.refined?0:1.3);
+      if(p.refined) {
+        const place=(id:string,x:number,z:number,yaw=0)=>{const q=parcelWorld(p,x,z);this.groundAsset(id,q.x,p.y+.02,q.z,p.yaw+yaw);};
+        if(p.use==="house") {
+          if(i%2===0)place("prop_028",0,-p.d/2+1.1);
+          if(!p.hasParking)place("prop_031",-p.w/2+1,p.d/2-.8,Math.PI/2);
+        }
+        if(p.use==="shop"||p.use==="apartment"||p.use==="company") {
+          place("prop_057",-p.w/2+.9,p.d/2-.7,Math.PI/2);
+          place("vehicle_062",-p.w/2+1.25,p.d/2-.85,Math.PI/2);
+          if(i%3===0)place("prop_043",p.w/2-1,p.d/2-.55);
+          else place("prop_031",p.w/2-.7,p.d/2-.45);
+        } else if(p.use==="house"&&i%5===0)place("prop_044",p.w/2-.95,p.d/2-.65);
+      }
     });
+    for(const space of this.communitySpaces) {
+      const place=(id:string,x:number,z:number,yaw=0)=>this.groundAsset(id,x,terrain.heightAt(x,z),z,yaw);
+      const B=new Builder(space.x,space.z);B.y=0;B.roofClutter=false;
+      const edge=(x:number,z:number,w:number,d:number)=>{
+        if(distanceToCommunityPaths(space,x,z)<2.3)return;
+        const h=.38,m=uvBox(this.scene,w,h,d,2);m.material=this.concrete;
+        B.part(m,new Vector3(x-space.x,terrain.heightAt(x,z)+h/2,z-space.z),new Vector3(w,h,d));
+      };
+      for(let x=space.x-space.w/2+2;x<space.x+space.w/2;x+=4)for(const side of [-1,1])edge(x,space.z+side*space.d/2,3.7,.18);
+      for(let z=space.z-space.d/2+2;z<space.z+space.d/2;z+=4)for(const side of [-1,1])edge(space.x+side*space.w/2,z,.18,3.7);
+      this.finish(B,"boundary",1e12);
+      if(space.use==="garden") {
+        for(let x=space.x-space.w/2+4;x<space.x+space.w/2-2;x+=5)for(let z=space.z-space.d/2+3;z<space.z+space.d/2-2;z+=4) {
+          if(distanceToCommunityPaths(space,x,z)>2.4)place("prop_028",x,z);
+        }
+      } else {
+        for(const side of [-1,1]) {
+          const x=space.x+side*(space.w/2-3),z=space.z+space.d/2-3;
+          if(distanceToCommunityPaths(space,x,z)>2.5)place("prop_001",x,z,Math.PI);
+        }
+        if(space.use==="court") {
+          const x=space.x-space.w/2+5,z=space.z-space.d/2+5;
+          if(distanceToCommunityPaths(space,x,z)>4)place("prop_010",x,z);
+        }
+      }
+      for(const side of [-1,1])for(const x of [space.x-space.w/2+3,space.x+space.w/2-3]) {
+        const z=space.z+side*(space.d/2-3);if(distanceToCommunityPaths(space,x,z)<3)continue;
+        this.props.trees[0].add(Matrix.Scaling(.6,.6,.6).multiply(Matrix.Translation(x,terrain.heightAt(x,z),z)));
+      }
+    }
     // 緑道・団地の空地と背割り境界に低木・樹木をまとめ、通路と出入口を空ける。
     const pilot=network.streets.length===8;
-    for(let i=0;i<(pilot?0:320);i++) {
+    for(let i=0;i<(pilot||this.communitySpaces.length?0:320);i++) {
       const a=i*2.399963,rr=26+Math.sqrt(i/320)*171,x=Math.cos(a)*rr,z=Math.sin(a)*rr;
       const near=network.nearest(x,z);
       if(!near||near.distance<near.street.width/2+near.street.sidewalk+4||near.distance>55||!this.isOpen(x,z,3))continue;
@@ -1937,12 +1999,24 @@ export class City {
       texture.update();const material=new PBRMaterial("neighborhood-tile-cladding",this.scene);
       material.albedoTexture=texture;material.roughness=.9;material.metallic=0;material.freeze();
       A.replaceSurface("building_042",["PBR_cream","PBR_white"],material);
+      const paints:[string[],Color3][]=[
+        [["building_002","building_013"],new Color3(.73,.65,.53)],
+        [["building_004","building_018"],new Color3(.49,.55,.57)],
+        [["building_011","building_030"],new Color3(.67,.7,.60)],
+      ];
+      for(const [ids,color] of paints) {
+        const paint=this.mats.plaster.clone("local-house-cladding")!;paint.albedoColor=color;paint.freeze();
+        for(const id of ids)A.replaceSurface(id,["PBR_cream","PBR_plaster"],paint);
+      }
     }
     for (const q of this.pending) {
       const p = A.place(q.id, q.x, q.y, q.z, q.yaw, q.parent, q.states);
       if (!p) continue;
       if (q.scale) p.root.scaling.copyFrom(q.scale);
       if(!this.legacy) {p.near=28+p.radius;p.far=85+p.radius*2;}
+      if(!this.legacy&&!q.parent&&["prop_031","prop_043","prop_044","prop_057","vehicle_062","infra_043"].includes(q.id)) {
+        p.near=18;p.far=45;p.maxDistance=85;
+      }
       if (q.moving) p.isStatic = false;
       if (q.cast) for (const m of p.meshes) this.shadowCasters.push(m as unknown as Mesh);
     }
